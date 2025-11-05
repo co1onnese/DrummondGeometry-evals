@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=65.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "drummond-geometry"
+version = "0.1.0"
+description = "Drummond Geometry Analysis System"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Drummond Geometry Team" }
+]
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "pydantic>=2.7",
+  "python-dotenv>=1.0",
+  "requests>=2.31",
+  "sqlalchemy>=2.0",
+  "psycopg[binary]>=3.1",
+  "structlog>=24.1"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2",
+  "ruff>=0.5",
+  "mypy>=1.10"
+]
+
+[project.urls]
+Homepage = "https://github.com/drummond-geometry/local"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+ignore = ["E203", "W503"]
+
+[tool.ruff.format]
+indent-style = "space"
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+pretty = true
+show_error_codes = true
+warn_return_any = true
+warn_unused_ignores = true
+exclude = ["tests"]

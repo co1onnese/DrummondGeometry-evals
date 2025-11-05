@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+env/
+.venv/
+venv/
+.env
+.env.*
+
+# Tooling
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Editors
+.idea/
+.vscode/
+
+# Data & logs
+data/
+logs/
+*.log
+
+# Generated artifacts
+dist/
+build/
+*.egg-info/
+*.sqlite3
