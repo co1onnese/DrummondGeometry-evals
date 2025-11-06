@@ -16,11 +16,13 @@ dependencies = [
   "numpy>=1.26",
   "pandas>=2.2",
   "pydantic>=2.7",
+  "pydantic-settings>=2.2",
   "python-dotenv>=1.0",
   "requests>=2.31",
   "sqlalchemy>=2.0",
   "psycopg[binary]>=3.1",
-  "structlog>=24.1"
+  "structlog>=24.1",
+  "rich>=13.0"
 ]
 
 [project.optional-dependencies]
@@ -31,7 +33,7 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/drummond-geometry/local"
+Homepage = "https://github.com/co1onnese/DrummondGeometry-evals"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -45,8 +45,7 @@ CREATE INDEX IF NOT EXISTS idx_market_data_symbol_timestamp
     ON market_data (symbol_id, timestamp DESC);
 
 CREATE INDEX IF NOT EXISTS idx_market_data_recent
-    ON market_data (timestamp DESC, symbol_id)
-    WHERE timestamp >= NOW() - INTERVAL '2 years';
+    ON market_data (timestamp DESC, symbol_id);
 
 CREATE TABLE IF NOT EXISTS market_data_metadata (
     metadata_id BIGSERIAL PRIMARY KEY,

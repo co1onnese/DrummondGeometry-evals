@@ -1,0 +1,712 @@
+# Drummond Geometry Analysis System (DGAS)
+# LLM-Optimized Codebase Reference
+
+## Project Overview
+Local-first market data ingestion and Drummond Geometry analysis toolkit implementing multi-timeframe coordination for trading signals.
+Phases: (0) scaffolding, (1) data pipeline, (2) calculations & multi-timeframe, (3) backtesting.
+Stack: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI formatting).
+
+---
+
+## Module Hierarchy & Goals
+
+### Core Package
+**dgas/__init__.py**
+- `get_version() -> str`: Return installed package version via importlib.metadata
+
+**dgas/__main__.py**
+- `build_parser() -> ArgumentParser`: CLI structure with subcommands (analyze, data-report, --version)
+- `main(argv: list[str] | None) -> int`: Route to subcommands or --version
+- Goal: CLI orchestration for analysis and reporting
+
+**dgas/settings.py**
+- `Settings(BaseSettings)`: Pydantic config loader
+  - Fields: `eodhd_api_token: str | None`, `database_url: str`, `data_dir: Path`, `eodhd_requests_per_minute: int`
+- `get_settings() -> Settings`: Cached singleton via @lru_cache
+- Goal: Centralized env-based configuration with .env support
+
+---
+
+### Database Layer
+**dgas/db/__init__.py**
+- `get_connection() -> Iterator[psycopg.Connection]`: Context manager for PostgreSQL transactions
+- Auto-commit on success, rollback on exception, always closes
+- Goal: Transactional connection wrapper
+
+**dgas/db/migrations.py**
+- `list_migration_files() -> Iterable[Path]`: Sorted *.sql from migrations/
+- `apply_all() -> None`: Execute pending migrations sequentially
+- `main() -> None`: CLI entry for migration runner
+- Internal: `_ensure_migrations_table`, `_get_applied_versions`, `_apply_migration`
+- Goal: Sequential migration runner with schema_migrations tracking
+
+**dgas/db/persistence.py**
+- `DrummondPersistence(settings: Settings | None)`: Database persistence for calculations
+  - `save_market_states(symbol: str, interval_type: str, states: Sequence[StateSeries]) -> int`
+  - `get_market_states(symbol: str, interval_type: str, start_time: datetime | None, end_time: datetime | None, limit: int) -> List[StateSeries]`
+  - `save_pattern_events(symbol: str, interval_type: str, patterns: Sequence[PatternEvent]) -> int`
+  - `get_pattern_events(symbol: str, interval_type: str, pattern_type: PatternType | None, start_time: datetime | None, end_time: datetime | None, limit: int) -> List[PatternEvent]`
+  - `save_multi_timeframe_analysis(symbol: str, analysis: MultiTimeframeAnalysis) -> int`
+  - `get_latest_multi_timeframe_analysis(symbol: str, htf_interval: str, trading_interval: str) -> dict | None`
+- Goal: CRUD operations for Drummond calculations (states, patterns, multi-timeframe analysis)
+
+**dgas/migrations/001_initial_schema.sql**
+- Tables: market_symbols, market_data, market_data_metadata, pldot_calculations, envelope_bands, drummond_lines, market_state, trading_signals, backtest_results, backtest_trades
+- Constraints: OHLC relationships, positive prices/volume, unique timestamps
+- Indexes: symbol+timestamp DESC for fast range queries
+- Goal: Full schema for ingestion, geometry calcs, signals, backtesting
+
+**dgas/migrations/002_enhanced_states_patterns.sql**
+- Tables: market_states_v2, pattern_events, multi_timeframe_analysis, confluence_zones
+- Enhanced state classification with confidence scores, trend direction, PLdot slope tracking
+- Pattern events: PLDOT_PUSH, PLDOT_REFRESH, EXHAUST, C_WAVE, CONGESTION_OSCILLATION
+- Multi-timeframe analysis with alignment scores, PLdot overlay, signal strength
+- Goal: Support Phase 2 enhanced state classification and pattern detection
+
+---
+
+### Data Ingestion & Quality
+**dgas/data/models.py**
+- `IntervalData(BaseModel)`: Immutable OHLCV bar
+  - Fields: symbol, exchange, timestamp (UTC), interval, open/high/low/close (Decimal), adjusted_close, volume (int)
+  - Validators: `_parse_timestamp`, `_to_decimal`, `_to_int`
+  - Factories: `from_api_record(record: Dict, interval: str, symbol_override: str | None) -> IntervalData`
+  - `from_api_list(records: Iterable[Dict], interval: str, symbol_override: str | None) -> List[IntervalData]`
+- Goal: Normalized representation of market bars with type safety
+
+**dgas/data/errors.py**
+- Exceptions: `EODHDError` (base), `EODHDAuthError`, `EODHDRateLimitError`, `EODHDRequestError`, `EODHDParsingError`
+- Goal: Typed exception hierarchy for API failures
+
+**dgas/data/rate_limiter.py**
+- `RateLimiter(max_calls: int, period: float, now_func: Callable | None, sleep_func: Callable | None)`
+  - Method: `acquire() -> None`: Block until call permitted (token bucket)
+- Goal: Client-side throttling to respect EODHD rate limits
+
+**dgas/data/client.py**
+- `EODHDConfig(api_token, base_url, requests_per_minute, timeout, max_retries, session)`
+  - Factory: `from_settings(Settings) -> EODHDConfig`
+- `EODHDClient(config: EODHDConfig)`
+  - `fetch_intraday(symbol: str, start: str | None, end: str | None, interval: str, limit: int) -> List[IntervalData]`
+  - `fetch_eod(symbol: str, start: str | None, end: str | None) -> List[IntervalData]`
+  - `list_exchange_symbols(exchange: str) -> List[Dict]`
+  - `close() -> None`
+- Helpers: `_coerce_time_param` (epoch seconds), `_coerce_date_param` (ISO date)
+- Goal: HTTP client with retries, rate limiting, auth, error mapping
+
+**dgas/data/quality.py**
+- `DataQualityReport(symbol, interval, total_bars, duplicate_count, gap_count, is_chronological, notes)`
+  - `to_dict() -> dict`
+- `analyze_intervals(Sequence[IntervalData]) -> DataQualityReport`: Validate completeness, chronology, duplicates
+- `summarize_reports(Iterable[DataQualityReport]) -> dict`: Aggregate quality metrics
+- `INTERVAL_SECONDS` map for gap detection
+- Goal: Validate data quality in ingested data
+
+**dgas/data/repository.py**
+- `ensure_market_symbol(conn: Connection, symbol: str, exchange: str, **metadata) -> int`: Upsert symbol, return symbol_id
+- `bulk_upsert_market_data(conn: Connection, symbol_id: int, interval: str, data: Sequence[IntervalData]) -> int`: Bulk upsert OHLCV bars
+- `get_latest_timestamp(conn: Connection, symbol_id: int, interval: str) -> datetime | None`: Most recent timestamp
+- `ensure_symbols_bulk(conn: Connection, symbols: Iterable[tuple[str, str]]) -> dict[str, int]`: Batch symbol creation
+- `get_symbol_id(conn: Connection, symbol: str) -> int | None`: Look up registered symbols without creating them
+- `fetch_market_data(conn: Connection, symbol: str, interval: str, *, start: datetime | None = None, end: datetime | None = None, limit: int | None = None) -> list[IntervalData]`: Chronological OHLCV retrieval for backtests
+- Goal: Database CRUD operations for symbols and OHLCV bars (upsert on conflict) plus read helpers for analytics/backtesting
+
+**dgas/data/ingestion.py**
+- `IngestionSummary(symbol, interval, fetched, stored, quality, start, end)`
+- `backfill_intraday(symbol: str, *, exchange: str, start_date: str, end_date: str, interval: str, client: EODHDClient | None) -> IngestionSummary`
+- `incremental_update_intraday(symbol: str, *, exchange: str, interval: str, buffer_days: int, default_start: str | None, client: EODHDClient | None) -> IngestionSummary`
+- `backfill_many(symbols: Sequence[tuple[str, str]], *, start_date: str, end_date: str, interval: str, client: EODHDClient | None) -> List[IngestionSummary]`
+- Helper: `_client_context(client | None)`: Manage client lifecycle
+- Goal: Orchestrate historical backfill and incremental updates with quality checks
+
+---
+
+### Drummond Geometry Calculations
+**dgas/calculations/pldot.py**
+- `PLDotSeries(timestamp, value, projected_timestamp, projected_value, slope, displacement)`: Frozen dataclass
+- `PLDotCalculator(displacement: int = 1)`
+  - `from_intervals(Sequence[IntervalData]) -> List[PLDotSeries]`: 3-period MA of (high+low+close)/3, projected forward
+- Goal: Compute PLdot (Predicted Line dot) with forward projection
+
+**dgas/calculations/envelopes.py**
+- `EnvelopeSeries(timestamp, center, upper, lower, width, position, method)`: Frozen dataclass
+- `EnvelopeCalculator(method: str = "pldot_range", period: int = 3, multiplier: float = 1.5, percent: float = 0.02)`
+  - Methods: "pldot_range" (Drummond 3-period std, DEFAULT), "atr" (ATR-based), "percentage" (fixed %)
+  - `from_intervals(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries]) -> List[EnvelopeSeries]`
+- Goal: Dynamic bands around PLdot using PLdot volatility (Drummond method)
+
+**dgas/calculations/drummond_lines.py**
+- `DrummondLine(start_timestamp, end_timestamp, start_price, end_price, projected_timestamp, projected_price, slope, line_type)`: Frozen dataclass
+- `DrummondZone(center_price, lower_price, upper_price, line_type, strength)`: Frozen dataclass
+- `DrummondLineCalculator(projection_gap: int = 1)`
+  - `from_intervals(Sequence[IntervalData]) -> List[DrummondLine]`: Generate support (lows) and resistance (highs) lines per two-bar pairs
+- `aggregate_zones(lines: Iterable[DrummondLine], tolerance: float = 0.5) -> List[DrummondZone]`: Cluster nearby lines by projected_price
+- Goal: Two-bar support/resistance projection and zone aggregation
+
+**dgas/calculations/states.py**
+- `MarketState(Enum)`: TREND, CONGESTION_ENTRANCE, CONGESTION_ACTION, CONGESTION_EXIT, REVERSAL
+- `TrendDirection(Enum)`: UP, DOWN, NEUTRAL
+- `StateSeries(timestamp, state, trend_direction, bars_in_state, previous_state, pldot_slope_trend, confidence, state_change_reason)`: Frozen dataclass
+- `MarketStateClassifier(slope_threshold: float = 0.0001)`
+  - `classify(intervals: Sequence[IntervalData], pldot_series: Sequence[PLDotSeries]) -> List[StateSeries]`
+  - Applies Drummond 3-bar rule: 3 consecutive closes above/below PLdot = trend, alternating = congestion
+- Goal: Classify market states with confidence scores and trend direction
+
+**dgas/calculations/patterns.py**
+- `PatternType(Enum)`: PLDOT_PUSH, PLDOT_REFRESH, EXHAUST, C_WAVE, CONGESTION_OSCILLATION
+- `PatternEvent(pattern_type, direction, start_timestamp, end_timestamp, strength)`: Frozen dataclass
+- Functions:
+  - `detect_pldot_push(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries]) -> List[PatternEvent]`: 3+ bars where close and PLdot slope align
+  - `detect_pldot_refresh(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries], tolerance: float = 0.1) -> List[PatternEvent]`: Price far from PLdot then returns
+  - `detect_exhaust(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries], envelopes: Sequence[EnvelopeSeries], extension_threshold: float = 2.0) -> List[PatternEvent]`: Price extends beyond envelope then reverses
+  - `detect_c_wave(envelopes: Sequence[EnvelopeSeries]) -> List[PatternEvent]`: 3+ bars at envelope extremes (position >= 0.9 or <= 0.1)
+  - `detect_congestion_oscillation(envelopes: Sequence[EnvelopeSeries]) -> List[PatternEvent]`: 4+ bars oscillating in middle envelope region (0.2-0.8)
+- Goal: Detect Drummond Geometry pattern events
+
+**dgas/calculations/multi_timeframe.py**
+- `TimeframeType(Enum)`: HIGHER, TRADING, LOWER
+- `TimeframeData(timeframe, classification, pldot_series, envelope_series, state_series, pattern_events)`: Frozen dataclass
+- `PLDotOverlay(timestamp, htf_timeframe, htf_pldot_value, htf_slope, ltf_timeframe, ltf_pldot_value, distance_percent, position)`: Frozen dataclass
+- `ConfluenceZone(level, upper_bound, lower_bound, strength, timeframes, zone_type, first_touch, last_touch)`: Frozen dataclass
+- `TimeframeAlignment(timestamp, htf_state, htf_direction, htf_confidence, trading_tf_state, trading_tf_direction, trading_tf_confidence, alignment_score, alignment_type, trade_permitted)`: Frozen dataclass
+- `MultiTimeframeAnalysis(timestamp, htf_timeframe, trading_timeframe, ltf_timeframe, htf_trend, htf_trend_strength, trading_tf_trend, alignment, pldot_overlay, confluence_zones, htf_patterns, trading_tf_patterns, pattern_confluence, signal_strength, risk_level, recommended_action)`: Frozen dataclass
+- `MultiTimeframeCoordinator(htf_timeframe: str, trading_timeframe: str, ltf_timeframe: str | None, confluence_tolerance_pct: float = 0.5, alignment_threshold: float = 0.6)`
+  - `analyze(htf_data: TimeframeData, trading_tf_data: TimeframeData, ltf_data: TimeframeData | None, target_timestamp: datetime | None) -> MultiTimeframeAnalysis`
+  - Coordinates HTF trend filter, PLdot overlay, confluence zones, state alignment, pattern confluence
+  - Calculates signal strength (0.0-1.0) and recommends action (long/short/wait/reduce)
+- Goal: Multi-timeframe coordination - core Drummond methodology (HTF defines trend, trading TF provides entries)
+
+### Backtesting Engine
+**dgas/backtesting/entities.py**
+- `SimulationConfig`, `Signal`, `Position`, `Trade`, `PortfolioSnapshot`, `BacktestResult`: Immutable dataclasses describing strategy directives, open positions, fills, and equity snapshots
+- Goal: Common data structures shared across engine, metrics, persistence, and reporting
+
+**dgas/backtesting/data_loader.py**
+- `load_ohlcv(symbol, interval, *, start=None, end=None, limit=None, conn=None) -> list[IntervalData]`: Fetch chronological OHLCV bars via repository helpers
+- `load_dataset(symbol, interval, *, start=None, end=None, include_indicators=True, limit=None, conn=None) -> BacktestDataset`: Bundle bars plus optional indicator snapshots
+- Goal: Provide deterministic, ready-to-simulate datasets for each symbol/interval
+
+**dgas/backtesting/engine.py**
+- `SimulationEngine(SimulationConfig | None)`: Deterministic execution core handling order sizing, commission/slippage, position management, equity curve tracking, and forced liquidation at end of dataset
+- `run(dataset: BacktestDataset, strategy: BaseStrategy) -> BacktestResult`: Execute strategy signals bar-by-bar
+- Goal: Reusable simulation kernel for all strategies
+
+**dgas/backtesting/strategies/**
+- `base.py`: `StrategyConfig` (pydantic), `StrategyContext`, `BaseStrategy`, `rolling_history()` helper deque
+- `multi_timeframe.py`: `MultiTimeframeStrategy` and config ? simple momentum-style placeholder matching CLI default
+- `registry.py`: `STRATEGY_REGISTRY` mapping names to classes; `instantiate_strategy(name, params)` builds configured strategies from CLI overrides
+- Goal: Pluggable strategy framework with registry-based discovery
+
+**dgas/backtesting/runner.py**
+- `BacktestRequest` dataclass encapsulating CLI options (symbols, interval, strategy, simulation config, persistence switches)
+- `BacktestRunner.run(request) -> list[BacktestRunResult]`: Load datasets, instantiate strategy, run engine, compute metrics, optionally persist results
+- Goal: High-level orchestration reused by CLI, tests, and notebooks
+
+**dgas/backtesting/metrics.py**
+- `calculate_performance(result, risk_free_rate=Decimal("0")) -> PerformanceSummary`: Compute total/annualized return, volatility, Sharpe, Sortino, max drawdown, trade stats, profit factor, net profit
+- Goal: Centralised performance analytics feeding reports and persistence
+
+**dgas/backtesting/persistence.py**
+- `persist_backtest(result, performance, metadata=None, conn=None) -> int`: Store backtest summary and trade ledger in PostgreSQL (`backtest_results`, `backtest_trades`), capturing runtime configuration in JSONB
+- Goal: Durable storage of simulation outcomes for later inspection or dashboards
+
+**dgas/backtesting/reporting.py**
+- `build_summary_table(run_results) -> rich.table.Table`: Console-ready summary view
+- `export_markdown(run, path)`, `export_json(run, path)`: Generate shareable artifacts per symbol
+- Goal: Reporting helpers shared by CLI and future UIs
+
+---
+
+### CLI & Monitoring
+**dgas/cli/analyze.py**
+- `load_market_data(symbol: str, interval: str, lookback_bars: int = 200) -> list[IntervalData]`: Load from DB
+- `calculate_indicators(intervals: list[IntervalData]) -> TimeframeData`: Calculate all indicators for single TF
+- `display_single_timeframe_analysis(symbol: str, interval: str, tf_data: TimeframeData) -> None`: Rich console output
+- `display_multi_timeframe_analysis(symbol: str, analysis: MultiTimeframeAnalysis) -> None`: Rich console output
+- `run_analyze_command(symbols: list[str], htf_interval: str, trading_interval: str, lookback_bars: int, save_to_db: bool, output_format: str) -> int`: Full analysis workflow
+- Goal: Interactive CLI for Drummond Geometry analysis with Rich formatting
+
+**dgas/cli/backtest.py**
+- `run_backtest_command(...) -> int`: Parse CLI arguments (strategy, capital, risk parameters, report destinations), invoke `BacktestRunner`, render Rich summary/detailed output, and emit optional Markdown/JSON artifacts
+- Helpers: `_parse_datetime`, `_resolve_output_path`, `_format_percent/_format_number`
+- Goal: User-facing entry to the Phase 3 backtesting workflow
+
+**dgas/monitoring/report.py**
+- `SymbolIngestionStats(symbol, exchange, interval, bar_count, first_timestamp, last_timestamp, estimated_missing_bars)`
+  - `to_row() -> Sequence[str]`
+- `generate_ingestion_report(interval: str = "30min") -> List[SymbolIngestionStats]`: Query DB for coverage
+- `render_markdown_report(stats: Iterable[SymbolIngestionStats]) -> str`: Format as GFM table
+- `write_report(stats: Iterable[SymbolIngestionStats], output_path: Path) -> None`
+- Helper: `_interval_to_seconds(interval: str) -> int`
+- Goal: Generate completeness reports for ingested market data
+
+---
+
+## File Connection Map (ASCII)
+
+```
+???????????????????????????????????????????????????????????????????????????????
+?                         CLI Entry Point                                      ?
+?  __main__.py ??> build_parser() ??> main()                                  ?
+?      ?                                                                        ?
+?      ??> get_version() ???????????????> __init__.py                         ?
+?      ??> cli.analyze.run_analyze_command() ??> analyze.py                   ?
+?      ??> monitoring.report.generate_ingestion_report() ??> report.py      ?
+????????????????????????????????????????????????????????????????????????????????
+                        ?
+                        ?
+???????????????????????????????????????????????????????????????????????????????
+?                    Configuration Layer                                       ?
+?  settings.py ??> get_settings() ??> Settings (Pydantic)                     ?
+?      ?                                                                       ?
+?      ???? .env file (EODHD_API_TOKEN, DATABASE_URL, etc.)                   ?
+????????????????????????????????????????????????????????????????????????????????
+                        ?
+        ???????????????????????????????????????????????????????????????????????
+        ?                               ?                      ?              ?
+?????????????????   ????????????????????????   ??????????????????  ????????????
+?   Database    ?   ?  Data Ingestion       ?   ? Calculations   ?  ? CLI      ?
+?   db/         ?   ?  data/               ?   ? calculations/  ?  ? cli/     ?
+?   ?? __init__ ?   ?  ?? client.py        ?   ? ?? pldot.py    ?  ? ??       ?
+?   ?   ?? get_ ?   ?  ?? ingestion.py     ?   ? ?? envelopes.py?  ? ? analyze?
+?   ?   connection?   ?  ?? repository.py    ?   ? ?? drummond_  ?  ? ?  .py   ?
+?   ?             ?   ?  ?? quality.py       ?   ? ?  lines.py    ?  ? ?        ?
+?   ?? migrations?   ?  ?? models.py        ?   ? ?? states.py   ?  ? ??       ?
+?   ?   ?? *.sql?   ?  ?? rate_limiter.py  ?   ? ?? patterns.py ?  ?          ?
+?   ?             ?   ?  ?? errors.py       ?   ? ?? multi_     ?  ?          ?
+?   ?? persistence?   ?                     ?   ?    timeframe   ?  ?          ?
+?     ?? Drummond   ?   ?  EODHDClient        ?   ?    .py        ?  ?          ?
+?        Persistence?   ?       ?              ?   ?                ?  ?          ?
+?                   ?   ?  EODHD API (HTTP)    ?   ? PLDotCalculator?  ?          ?
+?  get_connection() ?   ?       ?              ?   ? EnvelopeCalc   ?  ?          ?
+?        ?          ?   ?  IntervalData        ?   ? DrummondLineCalc?  ?          ?
+?   PostgreSQL      ?   ?       ?              ?   ? StateClassifier?  ?          ?
+?   (market_symbols,?   ?  repository.py       ?   ? PatternDetect ?  ?          ?
+?    market_data,   ?   ?  (upsert to DB)      ?   ? MultiTFCoord  ?  ?          ?
+?    market_states_ ?   ?       ?              ?   ?                ?  ?          ?
+?    v2,            ?   ?  quality.py          ?   ?                ?  ?          ?
+?    pattern_events,?   ?  (validate)          ?   ?                ?  ?          ?
+?    multi_timeframe?   ?                      ?   ??????????????????  ?          ?
+?    _analysis,     ?   ?                      ?          ?            ?          ?
+?    confluence_    ?   ?                      ?          ?            ?          ?
+?    zones)         ?   ?                      ?   persistence.py     ?          ?
+?????????????????????   ????????????????????????   (save to DB)      ?          ?
+        ?                         ?                                      ?          ?
+        ?                         ?                                      ?          ?
+        ??????????????????????????????????????????????????????????????????          ?
+              (transactions)                                                        ?
+                                                                                    ?
+????????????????????????????????????????????????????????????????????????????????????
+?                    Monitoring & Reports                                          ?
+?  monitoring/report.py ??> SymbolIngestionStats                                 ?
+?      ??> generate_ingestion_report() ??> SELECT from DB                        ?
+?      ??> render_markdown_report()   ??> GFM table string                       ?
+?      ??> write_report()             ??> Path.write_text                        ?
+????????????????????????????????????????????????????????????????????????????????????
+
+Data Flow:
+1. CLI: __main__.py parses args ? routes to analyze or data-report
+2. Analyze: Load data ? calculate indicators ? multi-timeframe coordination ? display/save
+3. Ingestion: EODHDClient ? IntervalData ? quality check ? repository ? PostgreSQL
+4. Calculations: IntervalData ? PLDot ? Envelopes ? States ? Patterns ? MultiTF Analysis
+5. Persistence: Calculations ? DrummondPersistence ? PostgreSQL (market_states_v2, pattern_events, multi_timeframe_analysis)
+```
+
+---
+
+## Data Flow Summary
+
+1. **Configuration**: settings.py loads .env ? Settings object (cached via @lru_cache)
+2. **CLI**: __main__.py parses args ? routes to analyze, data-report, or --version
+3. **Ingestion**:
+   - EODHDClient fetches JSON from EODHD API (rate-limited)
+   - IntervalData models parse & validate responses
+   - quality.analyze_intervals() checks gaps/duplicates/chronology
+   - repository.bulk_upsert_market_data() persists to PostgreSQL
+   - IngestionSummary captures stats
+4. **Calculations** (Phase 2):
+   - PLDotCalculator: 3-bar MA of (H+L+C)/3 ? projected line
+   - EnvelopeCalculator: PLdot range method (3-period std * multiplier) ? bands
+   - DrummondLineCalculator: 2-bar support/resistance ? zones
+   - MarketStateClassifier: 3-bar rule ? 5 states (TREND, CONGESTION_*, REVERSAL)
+   - Pattern detection: PLdot push/refresh, exhaust, C-wave, congestion oscillation
+   - MultiTimeframeCoordinator: HTF trend filter + PLdot overlay + confluence zones ? signal strength
+5. **Persistence**: DrummondPersistence saves states, patterns, multi-timeframe analysis to DB
+6. **Reporting**: monitoring/report.py queries DB for coverage stats ? Markdown table
+
+---
+
+## Code Style & Conventions
+
+### Type Safety
+- All functions use type hints (enforced by mypy --disallow-untyped-defs)
+- Pydantic models for validation (Settings, IntervalData)
+- Decimal for prices (avoid float rounding), datetime with timezone.utc
+- Frozen dataclasses for immutable calculation results (PLDotSeries, EnvelopeSeries, StateSeries, etc.)
+
+### Error Handling
+- Custom exceptions (EODHDError hierarchy) for external API failures
+- Context managers for resources (get_connection, _client_context, DrummondPersistence)
+- Transactional DB operations (commit on success, rollback on exception)
+
+### Code Organization (DRY)
+- Single Settings instance via @lru_cache
+- Reusable repository functions (ensure_market_symbol, bulk_upsert_market_data)
+- Generic timestamp coercion (_coerce_time_param, _coerce_date_param)
+- Shared quality analysis (analyze_intervals, summarize_reports)
+- Factory methods for data models (IntervalData.from_api_record, IntervalData.from_api_list)
+
+### Naming
+- snake_case for functions, variables, modules
+- PascalCase for classes, Pydantic models, Enums
+- Private helpers prefixed with _ (e.g., _ensure_migrations_table, _build_line)
+- Descriptive names: bulk_upsert_market_data, not save_data; MultiTimeframeCoordinator, not MTF
+
+### Dependencies
+- Production: numpy, pandas, pydantic, pydantic-settings, python-dotenv, requests, sqlalchemy, psycopg[binary], structlog, rich
+- Dev: pytest, ruff (linter/formatter), mypy (type checker)
+- Line length: 100 chars (ruff config)
+
+### Testing
+- pytest with pythonpath = ["src"], testpaths = ["tests"]
+- mypy excludes tests/ directory
+- Coverage: calculations/, data/, monitoring/ have tests
+
+---
+
+## Database Schema Notes
+
+### Core Tables
+- **market_symbols**: symbol (unique), exchange, metadata (sector, industry, market_cap)
+- **market_data**: OHLCV bars with interval_type, unique on (symbol_id, timestamp, interval_type)
+  * Constraints: positive prices, OHLC relationships (high ? open/close, low ? open/close)
+- **market_states_v2**: Enhanced state classification with confidence, trend direction, PLdot slope, bars_in_state
+- **pattern_events**: Detected patterns (PLDOT_PUSH, EXHAUST, C_WAVE, etc.) with direction, strength, timestamps
+- **multi_timeframe_analysis**: HTF/trading TF alignment, signal strength, recommended action, confluence zones count
+- **confluence_zones**: Support/resistance zones confirmed by multiple timeframes (strength >= 2)
+- **pldot_calculations**: PLdot values with slopes, momentum (legacy, may be replaced by calculations/)
+- **envelope_bands**: Upper/lower/middle bands, width, position (legacy, may be replaced by calculations/)
+- **drummond_lines**: Support/resistance with timestamps, slopes, strength (legacy)
+- **trading_signals**: Entry/stop/target prices, risk-reward (Phase 3)
+- **backtest_results**: Strategy metrics (Sharpe, max drawdown, win rate, etc.) (Phase 3)
+- **backtest_trades**: Individual trades per backtest with P&L (Phase 3)
+- **prediction_runs**: Metadata for scheduled prediction cycles with timing breakdown (Phase 4)
+- **generated_signals**: Trading signals with confidence scores, context, and outcomes (Phase 4)
+- **prediction_metrics**: Time-series performance and calibration metrics (Phase 4)
+- **scheduler_state**: Singleton table for scheduler status and recovery (Phase 4)
+
+### Indexing Strategy
+- DESC indexes on (symbol_id, timestamp) for recent data queries
+- Multi-column indexes for state/pattern queries (symbol_id, state, timestamp DESC)
+- Partial indexes for high-signal-strength analysis (WHERE signal_strength >= 0.6)
+- Cascade deletes on symbol removal
+
+---
+
+## Current Implementation Status
+
+### Completed (Phase 1 & 2)
+? Database schema and migrations (001 + 002)
+? Settings and configuration
+? EODHD API client with rate limiting
+? Data models (IntervalData) with validation
+? Repository layer (upsert, latest timestamp queries)
+? Ingestion workflows (backfill, incremental updates)
+? Quality analysis (gaps, duplicates, chronology)
+? CLI skeleton with analyze and data-report commands
+? Monitoring reports (Markdown output)
+? PLdot calculations (3-bar MA with projection)
+? Envelope bands (PLdot range method - Drummond's preferred)
+? Drummond lines and zones (two-bar logic)
+? Market state classification (5-state model with confidence)
+? Pattern detection (PLdot push/refresh, exhaust, C-wave, congestion oscillation)
+? Multi-timeframe coordination (HTF trend filter, PLdot overlay, confluence zones, alignment scoring)
+? Database persistence (DrummondPersistence for states, patterns, multi-timeframe analysis)
+
+### Completed (Phase 3)
+✓ Backtesting engine with deterministic simulation
+✓ Strategy framework with multi-timeframe strategy
+✓ Performance metrics (Sharpe, Sortino, max drawdown, win rate)
+✓ CLI backtest command with reporting
+✓ Walk-forward analysis support
+
+### In Progress (Phase 4 - Week 1 Foundation)
+? Prediction system database schema (migration 003) - COMPLETED
+? Prediction persistence layer (PredictionPersistence) - COMPLETED
+? Scheduled signal generation engine - PENDING
+? Multi-channel notification system - PENDING
+? Performance monitoring and calibration - PENDING
+
+### Pending (Phase 5+)
+? ML-enhanced confidence scoring
+? Adaptive threshold tuning based on calibration
+? Real-time streaming updates (WebSocket)
+? Web dashboard for visualization
+? Advanced PLdot variants (volume-weighted, momentum)
+? Portfolio-level risk management
+
+---
+
+## Key Design Decisions
+
+1. **Local-first**: PostgreSQL over cloud services for control and cost
+2. **Immutable data models**: Pydantic frozen=True, dataclass frozen=True for all calculation results
+3. **Explicit over implicit**: Type hints, validator methods, named parameters
+4. **Separation of concerns**: data/ (I/O), calculations/ (logic), db/ (persistence), cli/ (UI)
+5. **No ORM for ingestion**: Raw psycopg for bulk upserts (performance)
+6. **Rate limiting**: Client-side token bucket to avoid 429s
+7. **Decimal precision**: Prices as Decimal to match DB NUMERIC(12,6)
+8. **UTC everywhere**: Avoid timezone bugs with explicit timezone.utc
+9. **Multi-timeframe first**: HTF defines trend direction, trading TF provides entries (core Drummond principle)
+10. **Frozen dataclasses**: All calculation results are immutable to prevent accidental mutations
+
+---
+
+## Phase 4: Prediction System Architecture (In Progress)
+
+### Prediction Modules
+
+**prediction/persistence.py**
+- `PredictionPersistence(settings: Settings | None)`: Database persistence for prediction system
+  - `save_prediction_run(...)`: Save prediction cycle metadata with timing breakdown
+  - `get_recent_runs(limit, status)`: Retrieve recent prediction runs
+  - `save_generated_signals(run_id, signals)`: Bulk save trading signals
+  - `get_recent_signals(symbol, lookback_hours, min_confidence, limit)`: Query signals with filters
+  - `update_signal_outcome(signal_id, outcome, ...)`: Update signal with actual price data
+  - `save_metric(metric_type, metric_value, ...)`: Save performance/calibration metric
+  - `get_metrics(metric_type, lookback_hours, ...)`: Query metrics for analysis
+  - `update_scheduler_state(status, ...)`: Update singleton scheduler state
+  - `get_scheduler_state()`: Retrieve current scheduler status
+- Goal: CRUD operations for prediction runs, signals, metrics, and scheduler state
+
+**prediction/scheduler.py** (Pending)
+- `MarketHoursManager(session: TradingSession)`: Trading hours awareness
+  - `is_market_open(dt)`: Check if market is currently open
+  - `next_market_open()`: Calculate next market open time
+  - `get_session_intervals(interval)`: Generate interval timestamps for session
+- `PredictionScheduler(config, engine, market_hours)`: Interval-based prediction orchestration
+  - `start(daemon)`: Start scheduler loop (blocking or daemon thread)
+  - `stop()`: Graceful shutdown with in-flight task completion
+  - `run_once()`: Execute single prediction cycle (manual trigger/testing)
+- Goal: Automated prediction execution during market hours with recovery
+
+**prediction/engine.py** (Pending)
+- `PredictionEngine(settings, signal_generator, persistence)`: Prediction pipeline orchestration
+  - `execute_prediction_cycle(symbols, interval, timeframes)`: Full cycle execution
+  - `_refresh_market_data(symbols, interval)`: Incremental data updates
+  - `_recalculate_indicators(symbols, interval)`: Recompute Drummond indicators
+  - `_generate_signals(symbols, timeframes)`: Multi-timeframe signal generation
+- `SignalGenerator(coordinator, strategy_config)`: Signal generation wrapper
+  - `generate_signals(symbol, htf_data, trading_tf_data, ltf_data)`: Create actionable signals
+  - `_apply_entry_rules(analysis)`: Determine signal type (LONG/SHORT/EXIT)
+  - `_calculate_levels(signal_type, analysis)`: Calculate entry/stop/target prices
+  - `_calculate_confidence(analysis)`: Composite confidence score (0.0-1.0)
+- `SignalAggregator()`: De-duplication and ranking
+  - `aggregate_signals(signals, filters)`: Filter, rank, and de-duplicate signals
+- Goal: Transform multi-timeframe analysis into actionable trading signals
+
+**prediction/notifications/** (Pending)
+- `NotificationRouter(config, adapters)`: Multi-channel notification dispatch
+  - `send_notifications(signals, metadata)`: Deliver to configured channels
+- `adapters/console.py`: Rich console table output
+- `adapters/email.py`: SMTP email delivery with HTML templates
+- `adapters/webhook.py`: HTTP POST to user endpoints
+- `adapters/desktop.py`: Platform-specific toast notifications
+- Goal: Deliver signals through multiple channels with configurable thresholds
+
+**prediction/monitoring/** (Pending)
+- `PerformanceTracker(persistence)`: System performance monitoring
+  - `track_cycle(run_id, latency, throughput, errors)`: Record cycle metrics
+  - `get_performance_summary(lookback_hours)`: Aggregate statistics
+  - `check_sla_compliance()`: Verify SLA targets (latency, uptime, error rate)
+- `CalibrationEngine(persistence, evaluation_window_hours)`: Signal accuracy validation
+  - `evaluate_signal(signal, actual_prices)`: Compare signal to actual outcome
+  - `batch_evaluate(lookback_hours)`: Evaluate all pending signals
+  - `get_calibration_report(date_range)`: Win rate by confidence bucket
+- Goal: Track system performance and validate prediction accuracy
+
+### Database Schema (Migration 003)
+
+**prediction_runs table**
+- Tracks each scheduled prediction cycle
+- Fields: interval_type, symbols_requested, symbols_processed, signals_generated, execution_time_ms, status
+- Latency breakdown: data_fetch_ms, indicator_calc_ms, signal_generation_ms, notification_ms
+- Error tracking via errors TEXT[] array
+- Status: SUCCESS, PARTIAL, FAILED
+
+**generated_signals table**
+- All trading signals with rich context
+- Fields: signal_type, entry_price, stop_loss, target_price, confidence, signal_strength, timeframe_alignment
+- Context: htf_trend, trading_tf_state, confluence_zones_count, pattern_context (JSONB)
+- Notification tracking: notification_sent, notification_channels, notification_timestamp
+- Outcome tracking: outcome, actual_high, actual_low, actual_close, pnl_pct, evaluated_at
+- Signal types: LONG, SHORT, EXIT_LONG, EXIT_SHORT
+- Outcomes: WIN, LOSS, NEUTRAL, PENDING
+
+**prediction_metrics table**
+- Time-series performance and calibration metrics
+- Fields: metric_type, metric_value, aggregation_period, metadata (JSONB)
+- Metric types: latency_p95, throughput_avg, win_rate, accuracy, etc.
+- Aggregation periods: hourly, daily, weekly, monthly
+
+**scheduler_state table** (Singleton)
+- Scheduler status for recovery and monitoring
+- Fields: last_run_timestamp, next_scheduled_run, status, current_run_id, error_message
+- Status: IDLE, RUNNING, STOPPED, ERROR
+
+### Phase 4 Data Flow
+
+1. **Scheduler Trigger** (scheduled interval, e.g., 30min)
+2. **Market Hours Check** (skip if market closed)
+3. **Incremental Data Update** (fetch latest bars from EODHD)
+4. **Indicator Recalculation** (only for symbols with new data)
+5. **Signal Generation** (MultiTimeframeCoordinator → confidence scoring)
+6. **Signal Persistence** (save to generated_signals table)
+7. **Filtering & Ranking** (de-duplicate, apply thresholds)
+8. **Multi-Channel Notification** (console, email, webhook, desktop)
+9. **Performance Logging** (latency, throughput, errors)
+10. **Calibration Update** (periodic evaluation of past signals)
+
+---
+
+## Common Patterns
+
+### Adding a new calculation
+1. Define result dataclass in calculations/ (frozen=True, Decimal fields)
+2. Create Calculator class with __init__ parameters
+3. Implement from_intervals(Sequence[IntervalData]) -> List[ResultType]
+4. Use pandas for rolling/windowed operations if needed
+5. Add corresponding DB table in migrations/ if persisting
+6. Write persistence method in db/persistence.py if needed
+
+### Extending ingestion
+1. Add new method to EODHDClient (follow fetch_intraday pattern)
+2. Parse response into IntervalData.from_api_list or new model
+3. Add quality checks to quality.analyze_intervals if needed
+4. Create ingestion function in ingestion.py using _client_context
+5. Return IngestionSummary with quality report
+
+### Adding CLI commands
+1. Add subparser in __main__.build_parser()
+2. Handle in __main__.main() with args.command check
+3. Import and call relevant functions from modules
+4. Use Rich for formatted output (tables, panels, colors)
+5. Return 0 on success, nonzero on failure
+
+### Multi-timeframe analysis workflow
+1. Load data for HTF and trading TF using load_market_data()
+2. Calculate indicators for each TF (calculate_indicators())
+3. Create TimeframeData objects with classification (HIGHER/TRADING)
+4. Instantiate MultiTimeframeCoordinator with TF intervals
+5. Call coordinator.analyze(htf_data, trading_tf_data)
+6. Use analysis.signal_strength and analysis.recommended_action for trading decisions
+7. Optionally save via DrummondPersistence.save_multi_timeframe_analysis()
+
+---
+
+## Performance Considerations
+
+- **Bulk operations**: Use executemany for multi-row inserts
+- **Indexing**: DESC indexes match ORDER BY timestamp DESC queries
+- **Connection pooling**: Not yet implemented (single connection per transaction via get_connection)
+- **Caching**: Settings cached via @lru_cache, consider data caching later
+- **Pandas**: Used only in calculations/ where vectorization helps (PLdot, envelopes)
+- **Decimal precision**: Trade-off between precision and performance (Decimal is slower than float but required for financial accuracy)
+
+---
+
+## Future Optimizations
+
+- Connection pooling (psycopg_pool) for concurrent workflows
+- Incremental calculation updates (avoid recomputing entire history)
+- Materialized views for common aggregations (signal strength, alignment scores)
+- Partitioning market_data by timestamp range
+- Async EODHD client for parallel symbol ingestion
+- Pre-computed quality metrics in market_data_metadata table
+- Caching of recent multi-timeframe analyses
+
+---
+
+## Anti-Patterns to Avoid
+
+? Mixing sync and async (all code is synchronous for simplicity)
+? String SQL without parameters (always use %s placeholders)
+? Float for prices (use Decimal to match DB precision)
+? Naive datetimes (always set tzinfo=timezone.utc)
+? Global state (use dependency injection: client, conn args)
+? Catching bare Exception without logging/re-raise
+? Mutating Pydantic models or frozen dataclasses (all are frozen=True)
+? Hardcoding timeframes (use constants or settings)
+? Ignoring HTF trend direction (core Drummond principle)
+
+---
+
+## Deployment Notes
+
+### PostgreSQL Setup
+- User: fireworks_app (change default password!)
+- Database: dgas
+- Run: `uv run python -m dgas.db.migrations` to apply schema
+- See docs/setup_postgres.md for role creation SQL
+
+### Environment Variables
+```bash
+EODHD_API_TOKEN=your_token_here
+DGAS_DATABASE_URL=postgresql://user:pass@localhost:5432/dgas
+DGAS_DATA_DIR=/path/to/data
+EODHD_REQUESTS_PER_MINUTE=80
+```
+
+### Dependency Installation
+```bash
+uv venv && source .venv/bin/activate
+uv pip install -e .[dev]
+```
+
+### Quality Checks
+```bash
+ruff check src tests
+ruff format src tests
+mypy src
+pytest
+```
+
+---
+
+## Veteran Developer Observations
+
+### Architecture Strengths
+1. **Clear separation of concerns**: data/, calculations/, db/, cli/ are well-defined boundaries
+2. **Type safety**: Comprehensive type hints and Pydantic validation catch errors early
+3. **Immutable data structures**: Frozen dataclasses prevent accidental mutations
+4. **DRY principle**: Reusable repository functions, shared quality checks, factory methods
+5. **Multi-timeframe first**: Core Drummond principle is properly implemented with HTF trend filtering
+
+### Areas for Improvement
+1. **Connection pooling**: Currently using single connections per transaction - consider psycopg_pool for concurrent operations
+2. **Error handling**: Some areas could benefit from more specific exception types (e.g., CalculationError, PersistenceError)
+3. **Logging**: Consider structured logging (structlog is in dependencies but not extensively used)
+4. **Testing**: Some calculation modules could use more edge case coverage
+5. **Documentation**: Inline docstrings are good, but some complex algorithms (multi-timeframe coordination) could use more explanation
+
+### Code Quality
+- **Readability**: High - clear function names, good type hints, logical structure
+- **Maintainability**: High - modular design, clear boundaries, easy to extend
+- **Performance**: Good for current scale - may need optimization for high-frequency analysis
+- **Testability**: Good - functions are pure where possible, dependencies are injectable
+
+### Data Model Consistency
+- **Decimal precision**: Consistently used for all prices (good)
+- **UTC timestamps**: Consistently applied (good)
+- **Frozen models**: All calculation results are immutable (excellent)
+- **Enum usage**: Consistent use of Enums for state types, pattern types, trend directions (good)
+
+### Design Patterns
+- **Factory pattern**: IntervalData.from_api_record, EODHDConfig.from_settings
+- **Strategy pattern**: EnvelopeCalculator methods (pldot_range, atr, percentage)
+- **Context manager pattern**: get_connection, _client_context, DrummondPersistence
+- **Repository pattern**: data/repository.py for data access abstraction
+
+---
+
+End of llms.txt

@@ -15,7 +15,10 @@ def get_connection() -> Iterator[psycopg.Connection]:
     """Yield a psycopg connection using configured database URL."""
 
     settings = get_settings()
-    conn = psycopg.connect(settings.database_url)
+    conninfo = settings.database_url
+    if "+psycopg" in conninfo:
+        conninfo = conninfo.replace("+psycopg", "", 1)
+    conn = psycopg.connect(conninfo)
     try:
         yield conn
         conn.commit()
@@ -26,4 +29,9 @@ def get_connection() -> Iterator[psycopg.Connection]:
         conn.close()
 
 
-__all__ = ["get_connection"]
+try:
+    from .persistence import DrummondPersistence
+    __all__ = ["get_connection", "DrummondPersistence"]
+except ImportError:
+    # psycopg2 not available, DrummondPersistence will be unavailable
+    __all__ = ["get_connection"]

@@ -15,8 +15,14 @@ uv pip install -e .[dev]
 # run the CLI skeleton
 python -m dgas --version
 
+# initialize the database schema (PostgreSQL must be running)
+uv run python -m dgas.db.migrations
+
 # run the test suite
 pytest
+
+# generate a data ingestion report (writes Markdown when --output supplied)
+dgas data-report --interval 30min --output reports/ingestion.md
 ```
 
 ## Prerequisites
@@ -36,7 +42,7 @@ pytest
 2. Populate the following variables:
 
    - `EODHD_API_TOKEN` - API key issued by EODHD
-   - `DGAS_DATABASE_URL` - PostgreSQL connection string (defaults to `postgresql+psycopg://fireworks_app:changeme_secure_password@localhost:5432/dgas`)
+   - `DGAS_DATABASE_URL` - PostgreSQL connection string (defaults to `postgresql://fireworks_app:changeme_secure_password@localhost:5432/dgas`)
    - `DGAS_DATA_DIR` - Local path used for cached market data and generated reports
 
 3. Additional secrets can be appended as the project evolves. The `.env` file is ignored by Git.
