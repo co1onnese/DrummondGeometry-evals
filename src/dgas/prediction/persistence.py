@@ -6,14 +6,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Sequence
 
-try:
-    import psycopg2
-    from psycopg2.extras import execute_values, Json
-    HAS_PSYCOPG2 = True
-except ImportError:
-    # Fall back to psycopg (psycopg3)
-    import psycopg
-    HAS_PSYCOPG2 = False
+import psycopg
+from psycopg.types.json import Json
 
 from ..settings import Settings
 
@@ -27,18 +21,15 @@ class PredictionPersistence:
             from ..settings import get_settings
             settings = get_settings()
         self.settings = settings
-        self._conn: Optional[psycopg2.extensions.connection] = None
+        self._conn: Optional[psycopg.Connection] = None
 
-    def _get_connection(self) -> psycopg2.extensions.connection:
+    def _get_connection(self) -> psycopg.Connection:
         """Get or create database connection."""
         if self._conn is None or self._conn.closed:
-            self._conn = psycopg2.connect(
-                host=self.settings.db_host,
-                port=self.settings.db_port,
-                dbname=self.settings.db_name,
-                user=self.settings.db_user,
-                password=self.settings.db_password,
-            )
+            conninfo = self.settings.database_url
+            if "+psycopg" in conninfo:
+                conninfo = conninfo.replace("+psycopg", "", 1)
+            self._conn = psycopg.connect(conninfo)
         return self._conn
 
     def close(self) -> None:
@@ -286,9 +277,8 @@ class PredictionPersistence:
                     signal.get("notification_timestamp"),
                 ))
 
-            # Bulk insert
-            execute_values(
-                cursor,
+            # Bulk insert using executemany (psycopg3)
+            cursor.executemany(
                 """
                 INSERT INTO generated_signals (
                     run_id, symbol_id, signal_timestamp, signal_type,
@@ -297,7 +287,7 @@ class PredictionPersistence:
                     risk_reward_ratio, htf_trend, trading_tf_state,
                     confluence_zones_count, pattern_context,
                     notification_sent, notification_channels, notification_timestamp
-                ) VALUES %s
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 values
             )

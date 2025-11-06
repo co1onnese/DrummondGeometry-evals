@@ -2,4 +2,10 @@
 
 from __future__ import annotations
 
-__all__: list[str] = []
+__all__ = [
+    "DiscordAdapter",
+    "ConsoleAdapter",
+]
+
+from .discord import DiscordAdapter
+from .console import ConsoleAdapter

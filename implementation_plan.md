@@ -35,15 +35,13 @@
 
 ### Phase 5 - End-User Interfaces (Weeks 16-22)
 - Expand `dgas` CLI per specs (`configure`, `data`, `backtest`, `predict`, `report`, `status`)
-- Optionally build local Streamlit/Panel dashboard showing charts, signals, performance
-- Supply Jupyter templates for analysis plus onboarding documentation
-- Deliver local logging visualization and config editors
+- Optionally build local Streamlit dashboard showing charts, signals, performance
 - **Exit**: CLI exercised via integration tests, dashboard renders locally, user guide ready
 
 ### Phase 6 - Optimization, Documentation & Future Hooks (Weeks 20-26)
 - Optimize performance (query tuning, caching, profiling)
-- Write comprehensive runbooks, indicator references, troubleshooting guides
-- Prototype optional ML enhancements gated by feature flags; export utilities for future cloud migration
+- Write comprehensive runbooks, indicator references
+- Prototype AI LLM enhancements gated by feature flags;
 - Resolve technical debt (refactors, type hints, documentation coverage)
 - **Exit**: Stable daily ops with <5% manual intervention, profiling targets met, documentation publishable
 

@@ -19,10 +19,14 @@ python -m dgas --version
 uv run python -m dgas.db.migrations
 
 # run the test suite
-pytest
+uv run pytest
 
 # generate a data ingestion report (writes Markdown when --output supplied)
 dgas data-report --interval 30min --output reports/ingestion.md
+
+# run a backtest (persist results + export Markdown/JSON summaries)
+dgas backtest AAPL MSFT --interval 1h --start 2023-01-01 --end 2023-06-30 \
+  --initial-capital 100000 --report reports/backtests --json-output reports/backtests
 ```
 
 ## Prerequisites
@@ -79,5 +83,7 @@ dgas data-report --interval 30min --output reports/ingestion.md
 - `src/dgas/` - Python package source code (currently scaffolded)
 - `tests/` - automated tests
 - `.env.example` - template for local configuration
+
+Reference `docs/CLI_USAGE.md` for complete command documentation (analyze, backtest, data-report) and `docs/PHASE3_BACKTESTING_PLAN.md` for the Phase 3 architecture summary.
 
 Further setup and credential guidance will be refined as Phase 0 progresses.

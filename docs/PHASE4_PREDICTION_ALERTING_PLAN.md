@@ -12,7 +12,7 @@ Phase 4 delivers the real-time prediction and alerting capabilities required by 
 **Primary Goals:**
 - Enable scheduled calculation of Drummond Geometry indicators on live/recent market data
 - Generate high-probability trading signals using multi-timeframe coordination with confidence scoring
-- Deliver real-time alerts through multiple channels (console, email, webhook, desktop notifications)
+- Deliver real-time alerts through multiple channels (console, discord, webhook, desktop notifications)
 - Monitor prediction accuracy and system performance for continuous calibration
 
 **Exit Criteria:**
@@ -80,11 +80,9 @@ Key integration points:
 │    ├─ NotificationRouter (dispatches to configured channels)              │
 │    ├─ adapters/                                                           │
 │    │    ├─ ConsoleAdapter (rich table output)                             │
-│    │    ├─ EmailAdapter (SMTP integration)                                │
+│    │    ├─ DiscordAdapter (Discord Bot integration)                                │
 │    │    ├─ WebhookAdapter (HTTP POST to user endpoints)                   │
 │    │    ├─ DesktopAdapter (notify-send/toast notifications)               │
-│    │    └─ SlackAdapter (optional Slack integration)                      │
-│    └─ templates/ (Jinja2 templates for formatted messages)                │
 └───────────────────────┬────────────────────────────────────────────────────┘
                         │
                         ↓
@@ -164,7 +162,7 @@ Key integration points:
    ↓
 7. Multi-Channel Notification
    ├─ Console: Rich table with top signals
-   ├─ Email: HTML report with chart links
+   ├─ Discord: Rich embeds via Discord Bot (PRIMARY CHANNEL)
    ├─ Webhook: JSON payload to user endpoints
    ├─ Desktop: Toast notification for urgent signals
    └─ Log delivery status
@@ -610,42 +608,97 @@ class ConsoleAdapter(NotificationAdapter):
         return True
 ```
 
-**Email Adapter**
+**Discord Adapter**
 ```python
-class EmailAdapter(NotificationAdapter):
-    """SMTP email delivery with HTML formatting."""
+class DiscordAdapter(NotificationAdapter):
+    """Discord bot integration with rich embed formatting."""
 
     def __init__(
         self,
-        smtp_host: str,
-        smtp_port: int,
-        username: str,
-        password: str,
-        from_addr: str,
-        to_addrs: list[str],
-        template_path: Path,
+        bot_token: str,
+        channel_id: str,
+        embed_color: int = 0x00ff00,  # Green for signals
+        max_embeds_per_message: int = 10,
     ):
-        """Initialize SMTP connection details."""
+        """Initialize Discord bot connection details."""
 
     def send(self, signals, metadata) -> bool:
-        """Send HTML email with signal details."""
-        html_content = self._render_template(signals, metadata)
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = f"DGAS Signals: {len(signals)} New Setups"
-        msg["From"] = self.from_addr
-        msg["To"] = ", ".join(self.to_addrs)
+        """Send rich embeds to Discord channel."""
+        embeds = self._create_embeds(signals, metadata)
 
-        msg.attach(MIMEText(html_content, "html"))
+        # Send in batches if many signals
+        for i in range(0, len(embeds), self.max_embeds_per_message):
+            batch = embeds[i:i + self.max_embeds_per_message]
 
-        try:
-            with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
-                server.starttls()
-                server.login(self.username, self.password)
-                server.sendmail(self.from_addr, self.to_addrs, msg.as_string())
-            return True
-        except Exception as e:
-            logger.error(f"Email send failed: {e}")
-            return False
+            try:
+                self._send_to_discord(batch)
+                time.sleep(1)  # Rate limiting
+            except Exception as e:
+                logger.error(f"Discord send failed: {e}")
+                return False
+
+        return True
+
+    def _create_embeds(self, signals, metadata) -> list[dict]:
+        """Create Discord embed objects for signals."""
+        embeds = []
+        for signal in signals:
+            embed = {
+                "title": f"🎯 {signal.symbol} {signal.signal_type}",
+                "color": self._get_color_for_signal(signal),
+                "fields": [
+                    {
+                        "name": "Entry Price",
+                        "value": f"${signal.entry_price:.2f}",
+                        "inline": True
+                    },
+                    {
+                        "name": "Stop Loss",
+                        "value": f"${signal.stop_loss:.2f}",
+                        "inline": True
+                    },
+                    {
+                        "name": "Target Price",
+                        "value": f"${signal.target_price:.2f}",
+                        "inline": True
+                    },
+                    {
+                        "name": "Confidence",
+                        "value": f"{signal.confidence:.1%}",
+                        "inline": True
+                    },
+                    {
+                        "name": "R:R Ratio",
+                        "value": f"{signal.risk_reward_ratio:.2f}",
+                        "inline": True
+                    },
+                    {
+                        "name": "Timeframe",
+                        "value": f"{signal.htf_trend} → {signal.trading_tf_state}",
+                        "inline": True
+                    }
+                ],
+                "footer": {
+                    "text": f"Generated: {signal.timestamp.strftime('%H:%M UTC')} | DGAS v{get_version()}"
+                }
+            }
+            embeds.append(embed)
+        return embeds
+
+    def _send_to_discord(self, embeds: list[dict]) -> None:
+        """Send embeds via Discord API."""
+        url = f"https://discord.com/api/v10/channels/{self.channel_id}/messages"
+        headers = {
+            "Authorization": f"Bot {self.bot_token}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "embeds": embeds
+        }
+
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status()
 ```
 
 **Webhook Adapter**
@@ -1071,7 +1124,7 @@ python -m dgas predict \
     --interval 30min \
     --timeframes 4h 1h 30min \
     --min-confidence 0.6 \
-    --notify console email \
+    --notify console discord \
     --save
 
 # Run with custom filters
@@ -1081,7 +1134,8 @@ python -m dgas predict \
     --min-confidence 0.7 \
     --min-alignment 0.6 \
     --patterns PLDOT_PUSH EXHAUST \
-    --notify webhook \
+    --notify discord webhook \
+    --discord-channel 1234567890123456789 \
     --webhook-url https://my-server.com/signals
 
 # Dry run (no notifications or persistence)
@@ -1134,9 +1188,13 @@ predict_parser.add_argument(
 predict_parser.add_argument(
     "--notify",
     nargs="+",
-    choices=["console", "email", "webhook", "desktop"],
+    choices=["console", "discord", "webhook", "desktop"],
     default=["console"],
     help="Notification channels to use",
+)
+predict_parser.add_argument(
+    "--discord-channel",
+    help="Discord channel ID for bot delivery",
 )
 predict_parser.add_argument(
     "--webhook-url",
@@ -1331,16 +1389,12 @@ notifications:
     output_format: "summary"
     max_signals_displayed: 10
 
-  email:
-    smtp_host: "smtp.gmail.com"
-    smtp_port: 587
-    username: "your-email@gmail.com"
-    password_env: "DGAS_EMAIL_PASSWORD"  # Load from env var
-    from_addr: "dgas-alerts@yourdomain.com"
-    to_addrs:
-      - "trader@example.com"
-    min_confidence: 0.7
-    template: "templates/email_signal.html"
+  discord:
+    bot_token_env: "DGAS_DISCORD_BOT_TOKEN"  # Load from env var
+    channel_id: "1234567890123456789"  # Discord channel ID
+    min_confidence: 0.6
+    embed_color: 0x00ff00  # Green for signals
+    max_embeds_per_message: 10
 
   webhook:
     urls:
@@ -1642,27 +1696,15 @@ def sample_signals():
 - [ ] Implement `ConsoleAdapter`
 - [ ] Write tests for routing logic
 
-**Days 3-4: Email & Webhook Adapters**
-- [ ] Implement `EmailAdapter`
-  - [ ] SMTP integration
-  - [ ] HTML template rendering
+**Days 3-4: Discord Bot & Webhook Adapters**
+- [ ] Implement `DiscordAdapter`
+  - [ ] Discord Bot API integration with rich embeds
+  - [ ] Rate limiting and error handling
+  - [ ] Batch message sending for multiple signals
 - [ ] Implement `WebhookAdapter`
   - [ ] HTTP POST with retries
-- [ ] Write tests with mocked SMTP/HTTP
-- [ ] Create email templates (Jinja2)
-
-**Days 5-6: Desktop & Advanced Adapters**
-- [ ] Implement `DesktopAdapter`
-  - [ ] Platform-specific notification APIs
-- [ ] Optional: Implement `SlackAdapter`
-- [ ] Write tests for all adapters
-- [ ] Integration test: multi-channel delivery
-
-**Day 7: Notification Templates**
-- [ ] Create Jinja2 templates for email
-- [ ] Design rich console output format
-- [ ] Test templates with sample signals
-- [ ] Documentation for custom templates
+- [ ] Write tests with mocked Discord API/HTTP
+- [ ] Create rich embed templates for Discord alerts
 
 ---
 

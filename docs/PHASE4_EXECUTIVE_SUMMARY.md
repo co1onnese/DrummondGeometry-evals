@@ -25,8 +25,6 @@ Phase 4 transforms DGAS from a historical analysis tool into a **real-time predi
 - **Console:** Rich formatted tables
 - **Email:** HTML templates with signal details
 - **Webhook:** JSON POST to user endpoints
-- **Desktop:** Platform-specific toast notifications
-- **Configurable thresholds** per channel (e.g., email only for confidence ≥0.7)
 
 ### 3. Performance Monitoring & Calibration
 - **Real-time metrics:** Latency, throughput, error rates
@@ -38,7 +36,7 @@ Phase 4 transforms DGAS from a historical analysis tool into a **real-time predi
 ### 4. Enhanced CLI
 ```bash
 # Run single prediction cycle
-dgas predict --symbols AAPL MSFT --interval 30min --notify email webhook
+dgas predict --symbols AAPL MSFT --interval 30min --notify discord webhook
 
 # Start scheduler daemon
 dgas scheduler start --interval 30min --daemon

@@ -63,6 +63,15 @@ Stack: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI formatting).
 - Multi-timeframe analysis with alignment scores, PLdot overlay, signal strength
 - Goal: Support Phase 2 enhanced state classification and pattern detection
 
+**dgas/migrations/004_exchange_calendar.sql** (COMPLETED Week 3)
+- Tables: exchanges, market_holidays, trading_days
+- exchanges: Exchange metadata (timezone, market_open/close times, country, currency, sync tracking)
+- market_holidays: Holiday and half-day schedules with early_close_time support
+- trading_days: Pre-computed trading calendar with actual_close times for half-days
+- Indexes: exchange_code on all tables, trading_date on trading_days for range queries
+- CHECK constraints: Validate early_close < market_close, actual_close <= market_close
+- Goal: Database-backed trading calendar from EODHD for market hours logic
+
 ---
 
 ### Data Ingestion & Quality
@@ -242,97 +251,50 @@ Stack: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI formatting).
 
 ---
 
+
 ## File Connection Map (ASCII)
 
 ```
-???????????????????????????????????????????????????????????????????????????????
-?                         CLI Entry Point                                      ?
-?  __main__.py ??> build_parser() ??> main()                                  ?
-?      ?                                                                        ?
-?      ??> get_version() ???????????????> __init__.py                         ?
-?      ??> cli.analyze.run_analyze_command() ??> analyze.py                   ?
-?      ??> monitoring.report.generate_ingestion_report() ??> report.py      ?
-????????????????????????????????????????????????????????????????????????????????
-                        ?
-                        ?
-???????????????????????????????????????????????????????????????????????????????
-?                    Configuration Layer                                       ?
-?  settings.py ??> get_settings() ??> Settings (Pydantic)                     ?
-?      ?                                                                       ?
-?      ???? .env file (EODHD_API_TOKEN, DATABASE_URL, etc.)                   ?
-????????????????????????????????????????????????????????????????????????????????
-                        ?
-        ???????????????????????????????????????????????????????????????????????
-        ?                               ?                      ?              ?
-?????????????????   ????????????????????????   ??????????????????  ????????????
-?   Database    ?   ?  Data Ingestion       ?   ? Calculations   ?  ? CLI      ?
-?   db/         ?   ?  data/               ?   ? calculations/  ?  ? cli/     ?
-?   ?? __init__ ?   ?  ?? client.py        ?   ? ?? pldot.py    ?  ? ??       ?
-?   ?   ?? get_ ?   ?  ?? ingestion.py     ?   ? ?? envelopes.py?  ? ? analyze?
-?   ?   connection?   ?  ?? repository.py    ?   ? ?? drummond_  ?  ? ?  .py   ?
-?   ?             ?   ?  ?? quality.py       ?   ? ?  lines.py    ?  ? ?        ?
-?   ?? migrations?   ?  ?? models.py        ?   ? ?? states.py   ?  ? ??       ?
-?   ?   ?? *.sql?   ?  ?? rate_limiter.py  ?   ? ?? patterns.py ?  ?          ?
-?   ?             ?   ?  ?? errors.py       ?   ? ?? multi_     ?  ?          ?
-?   ?? persistence?   ?                     ?   ?    timeframe   ?  ?          ?
-?     ?? Drummond   ?   ?  EODHDClient        ?   ?    .py        ?  ?          ?
-?        Persistence?   ?       ?              ?   ?                ?  ?          ?
-?                   ?   ?  EODHD API (HTTP)    ?   ? PLDotCalculator?  ?          ?
-?  get_connection() ?   ?       ?              ?   ? EnvelopeCalc   ?  ?          ?
-?        ?          ?   ?  IntervalData        ?   ? DrummondLineCalc?  ?          ?
-?   PostgreSQL      ?   ?       ?              ?   ? StateClassifier?  ?          ?
-?   (market_symbols,?   ?  repository.py       ?   ? PatternDetect ?  ?          ?
-?    market_data,   ?   ?  (upsert to DB)      ?   ? MultiTFCoord  ?  ?          ?
-?    market_states_ ?   ?       ?              ?   ?                ?  ?          ?
-?    v2,            ?   ?  quality.py          ?   ?                ?  ?          ?
-?    pattern_events,?   ?  (validate)          ?   ?                ?  ?          ?
-?    multi_timeframe?   ?                      ?   ??????????????????  ?          ?
-?    _analysis,     ?   ?                      ?          ?            ?          ?
-?    confluence_    ?   ?                      ?          ?            ?          ?
-?    zones)         ?   ?                      ?   persistence.py     ?          ?
-?????????????????????   ????????????????????????   (save to DB)      ?          ?
-        ?                         ?                                      ?          ?
-        ?                         ?                                      ?          ?
-        ??????????????????????????????????????????????????????????????????          ?
-              (transactions)                                                        ?
-                                                                                    ?
-????????????????????????????????????????????????????????????????????????????????????
-?                    Monitoring & Reports                                          ?
-?  monitoring/report.py ??> SymbolIngestionStats                                 ?
-?      ??> generate_ingestion_report() ??> SELECT from DB                        ?
-?      ??> render_markdown_report()   ??> GFM table string                       ?
-?      ??> write_report()             ??> Path.write_text                        ?
-????????????????????????????????????????????????????????????????????????????????????
-
-Data Flow:
-1. CLI: __main__.py parses args ? routes to analyze or data-report
-2. Analyze: Load data ? calculate indicators ? multi-timeframe coordination ? display/save
-3. Ingestion: EODHDClient ? IntervalData ? quality check ? repository ? PostgreSQL
-4. Calculations: IntervalData ? PLDot ? Envelopes ? States ? Patterns ? MultiTF Analysis
-5. Persistence: Calculations ? DrummondPersistence ? PostgreSQL (market_states_v2, pattern_events, multi_timeframe_analysis)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              CLI Entry Point                                │
+│  dgas/__main__.py                                                           │
+│      ├─ analyze      → cli/analyze.py → calculations/, data/                │
+│      ├─ backtest     → cli/backtest.py → backtesting/ (runner, engine)      │
+│      └─ data-report  → monitoring/report.py                                 │
+└──────────────────────┬────────────────────────────────────────────────────────┘
+                       │
+                       ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Configuration Layer (settings.py)                    │
+│  get_settings() → Settings (Pydantic, .env)                                 │
+└──────────────────────┬────────────────────────────────────────────────────────┘
+                       │
+        ┌──────────────┴──────────────┬──────────────────┬─────────────────────┐
+        ↓                              ↓                  ↓                     ↓
+┌───────────────┐   ┌────────────────────┐   ┌────────────────┐   ┌────────────────────┐
+│  Database     │   │ Data Ingestion     │   │ Calculations    │   │ Backtesting         │
+│  db/, migrations │ │ data/ client, repo│   │ calculations/   │   │ backtesting/ runner,│
+│  DrummondPersistence │ quality, ingestion│ │ PLdot/States/    │   │ engine, metrics,     │
+│  get_connection() │ │ fetch_market_data │   │ Patterns/MTF    │   │ persistence/reporting │
+└──────┬────────┘   └─────────┬──────────┘   └────────┬───────┘   └────────┬──────────┘
+       │                      │                      │                    │
+       ↓                      ↓                      ↓                    ↓
+PostgreSQL ← bulk_upsert_market_data()   Indicator outputs → strategies   persist_backtest()
+Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis, backtest_results/trades
 ```
+
 
 ---
 
+
 ## Data Flow Summary
 
-1. **Configuration**: settings.py loads .env ? Settings object (cached via @lru_cache)
-2. **CLI**: __main__.py parses args ? routes to analyze, data-report, or --version
-3. **Ingestion**:
-   - EODHDClient fetches JSON from EODHD API (rate-limited)
-   - IntervalData models parse & validate responses
-   - quality.analyze_intervals() checks gaps/duplicates/chronology
-   - repository.bulk_upsert_market_data() persists to PostgreSQL
-   - IngestionSummary captures stats
-4. **Calculations** (Phase 2):
-   - PLDotCalculator: 3-bar MA of (H+L+C)/3 ? projected line
-   - EnvelopeCalculator: PLdot range method (3-period std * multiplier) ? bands
-   - DrummondLineCalculator: 2-bar support/resistance ? zones
-   - MarketStateClassifier: 3-bar rule ? 5 states (TREND, CONGESTION_*, REVERSAL)
-   - Pattern detection: PLdot push/refresh, exhaust, C-wave, congestion oscillation
-   - MultiTimeframeCoordinator: HTF trend filter + PLdot overlay + confluence zones ? signal strength
-5. **Persistence**: DrummondPersistence saves states, patterns, multi-timeframe analysis to DB
-6. **Reporting**: monitoring/report.py queries DB for coverage stats ? Markdown table
+1. **Configuration**: `settings.py` loads `.env` → cached `Settings` instance
+2. **CLI Routing**: `__main__.py` dispatches to `analyze`, `backtest`, or `data-report`
+3. **Ingestion**: `data/` modules fetch EODHD data, validate quality, and persist via `bulk_upsert_market_data()`
+4. **Calculations**: Phase 2 calculators produce PLdot, envelopes, states, patterns, and multi-timeframe alignment
+5. **Backtesting**: `backtesting/runner.py` loads historical bars, runs strategies through the engine, computes metrics, optionally persists to `backtest_results` / `backtest_trades`, and exports reports
+6. **Monitoring**: `monitoring/report.py` generates ingestion coverage summaries and Markdown output
 
 ---
 
@@ -430,12 +392,15 @@ Data Flow:
 ✓ CLI backtest command with reporting
 ✓ Walk-forward analysis support
 
-### In Progress (Phase 4 - Week 1 Foundation)
-? Prediction system database schema (migration 003) - COMPLETED
-? Prediction persistence layer (PredictionPersistence) - COMPLETED
-? Scheduled signal generation engine - PENDING
-? Multi-channel notification system - PENDING
-? Performance monitoring and calibration - PENDING
+### In Progress (Phase 4 - Week 4 Notification System)
+✓ Prediction system database schema (migration 003) - COMPLETED (Week 1)
+✓ Prediction persistence layer (PredictionPersistence) - COMPLETED (Week 1)
+✓ Signal generation engine (SignalGenerator, PredictionEngine, SignalAggregator) - COMPLETED (Week 2)
+✓ Exchange calendar system with EODHD integration (migration 004) - COMPLETED (Week 3)
+✓ Market hours management with database-backed calendar - COMPLETED (Week 3)
+✓ APScheduler-based prediction scheduling with catch-up logic - COMPLETED (Week 3)
+✓ Multi-channel notification system (Discord + Console) - COMPLETED (Week 4)
+? Performance monitoring and calibration - PENDING (Week 5)
 
 ### Pending (Phase 5+)
 ? ML-enhanced confidence scoring
@@ -479,40 +444,92 @@ Data Flow:
   - `get_scheduler_state()`: Retrieve current scheduler status
 - Goal: CRUD operations for prediction runs, signals, metrics, and scheduler state
 
-**prediction/scheduler.py** (Pending)
-- `MarketHoursManager(session: TradingSession)`: Trading hours awareness
-  - `is_market_open(dt)`: Check if market is currently open
-  - `next_market_open()`: Calculate next market open time
-  - `get_session_intervals(interval)`: Generate interval timestamps for session
-- `PredictionScheduler(config, engine, market_hours)`: Interval-based prediction orchestration
-  - `start(daemon)`: Start scheduler loop (blocking or daemon thread)
-  - `stop()`: Graceful shutdown with in-flight task completion
-  - `run_once()`: Execute single prediction cycle (manual trigger/testing)
-- Goal: Automated prediction execution during market hours with recovery
+**data/exchange_calendar.py** (COMPLETED Week 3)
+- `ExchangeCalendar(settings, use_cache)`: EODHD exchange API integration
+  - `fetch_exchange_details(exchange_code, from_date, to_date)`: Fetch exchange metadata from EODHD API
+  - `sync_exchange_calendar(exchange_code, force_refresh)`: Sync calendar to database (6 months back/forward)
+  - `is_trading_day(exchange_code, check_date)`: Check if date is trading day (queries database)
+  - `get_trading_hours(exchange_code, check_date)`: Get market open/close times including half-days
+- Database tables: exchanges (metadata, timezone, hours), market_holidays (holidays + half-days), trading_days (pre-computed calendar)
+- Supports half-day early close times (e.g., 1:00 PM on day after Thanksgiving)
+- Goal: Database-backed trading calendar from EODHD to minimize API calls and support market hours logic
 
-**prediction/engine.py** (Pending)
-- `PredictionEngine(settings, signal_generator, persistence)`: Prediction pipeline orchestration
-  - `execute_prediction_cycle(symbols, interval, timeframes)`: Full cycle execution
-  - `_refresh_market_data(symbols, interval)`: Incremental data updates
-  - `_recalculate_indicators(symbols, interval)`: Recompute Drummond indicators
-  - `_generate_signals(symbols, timeframes)`: Multi-timeframe signal generation
-- `SignalGenerator(coordinator, strategy_config)`: Signal generation wrapper
+**prediction/scheduler.py** (COMPLETED Week 3)
+- `TradingSession(dataclass)`: Trading session configuration
+  - Fields: market_open (time), market_close (time), timezone (str), trading_days (list[str])
+  - Defaults: 9:30 AM - 4:00 PM ET, Monday-Friday
+  - Frozen dataclass with validation (market_open < market_close, valid timezone)
+- `SchedulerConfig(dataclass)`: Scheduler configuration
+  - Fields: interval (str), exchange_code (str), catch_up_on_start (bool), daemon_mode (bool)
+  - Interval parsing: "30min" → 30 minutes for APScheduler CronTrigger
+- `MarketHoursManager(exchange_code, session, calendar)`: Trading hours awareness with database-backed calendar
+  - `is_market_open(dt)`: Check if market is currently open (queries database for holidays/half-days)
+  - `next_market_open(from_dt)`: Calculate next market open time (skips weekends/holidays)
+  - `next_market_close(from_dt)`: Calculate next market close time (handles half-days)
+  - `is_trading_day(dt)`: Check if given datetime is trading day
+- `PredictionScheduler(config, engine, persistence, market_hours)`: APScheduler-based prediction orchestration
+  - `start()`: Start scheduler with APScheduler, run catch-up if enabled
+  - `stop(wait)`: Graceful shutdown with signal handling (SIGTERM, SIGINT)
+  - `run_once()`: Execute single prediction cycle manually (for testing)
+  - `_run_catch_up()`: Run comprehensive cycle from market open to now if started late
+  - `_execute_if_market_open()`: Execute cycle only if market is open (scheduled job)
+  - Uses APScheduler CronTrigger for interval alignment (e.g., :00 and :30 for 30min intervals)
+  - Thread-safe execution with locks to prevent concurrent cycles
+  - Catch-up logic: single comprehensive analysis from market open to current time
+- Goal: Automated prediction execution during market hours with APScheduler, recovery, and graceful shutdown
+
+**prediction/engine.py** (COMPLETED Week 2)
+- `SignalType(Enum)`: LONG, SHORT, EXIT_LONG, EXIT_SHORT
+- `GeneratedSignal(dataclass)`: Complete trading signal with context
+  - Fields: symbol, signal_timestamp, signal_type, entry_price, stop_loss, target_price
+  - Metrics: confidence, signal_strength, timeframe_alignment, risk_reward_ratio
+  - Context: htf_trend, trading_tf_state, confluence_zones_count, pattern_context, htf_timeframe, trading_timeframe
+  - Notification tracking: notification_sent, notification_channels, notification_timestamp
+- `SignalGenerator(coordinator, min_alignment_score, min_signal_strength, stop_loss_atr_multiplier, target_rr_ratio)`: Signal generation from multi-timeframe analysis
   - `generate_signals(symbol, htf_data, trading_tf_data, ltf_data)`: Create actionable signals
-  - `_apply_entry_rules(analysis)`: Determine signal type (LONG/SHORT/EXIT)
-  - `_calculate_levels(signal_type, analysis)`: Calculate entry/stop/target prices
-  - `_calculate_confidence(analysis)`: Composite confidence score (0.0-1.0)
-- `SignalAggregator()`: De-duplication and ranking
-  - `aggregate_signals(signals, filters)`: Filter, rank, and de-duplicate signals
-- Goal: Transform multi-timeframe analysis into actionable trading signals
+  - `_apply_entry_rules(analysis)`: Determine signal type based on HTF trend + alignment + confluence
+  - `_calculate_levels(signal_type, analysis, trading_tf_data)`: Calculate entry/stop/target using confluence zones
+  - `_calculate_confidence(analysis)`: Weighted score (alignment 30%, confluence 20%, HTF strength 25%, zones 15%, signal 10%)
+- `SignalAggregator(dedup_time_window_minutes, min_confidence, min_alignment)`: De-duplication and ranking
+  - `aggregate_signals(signals, min_confidence, min_alignment, enabled_patterns, max_signals)`: Filter, rank, deduplicate
+  - `_detect_duplicates(signals)`: Remove duplicates within time window, keep highest confidence
+  - `_rank_signals(signals)`: Rank by composite score (confidence × signal_strength × timeframe_alignment)
+- `PredictionRunResult(dataclass)`: Execution metrics from prediction cycle
+- `PredictionEngine(settings, persistence, signal_generator, lookback_bars)`: Prediction pipeline orchestration
+  - `execute_prediction_cycle(symbols, interval, timeframes, htf_interval, trading_interval, persist_results)`: Full cycle
+  - `_refresh_market_data(symbols, interval, errors)`: Incremental updates using incremental_update_intraday
+  - `_load_market_data(symbol, interval)`: Load recent bars from database
+  - `_calculate_timeframe_data(intervals, timeframe, classification)`: Recompute Drummond indicators
+  - `_signal_to_dict(signal)`: Convert GeneratedSignal to dict for persistence
+- Goal: Transform multi-timeframe analysis into actionable trading signals with complete orchestration
 
-**prediction/notifications/** (Pending)
-- `NotificationRouter(config, adapters)`: Multi-channel notification dispatch
-  - `send_notifications(signals, metadata)`: Deliver to configured channels
+**prediction/notifications/** (COMPLETED Week 4)
+- `NotificationConfig(dataclass)`: Configuration for notification delivery
+  - Fields: enabled_channels, discord_bot_token, discord_channel_id, discord_min_confidence, console_max_signals, console_format
+  - `from_env()`: Create config from environment variables (DGAS_DISCORD_BOT_TOKEN, DGAS_DISCORD_CHANNEL_ID)
+- `NotificationAdapter(ABC)`: Abstract base for notification channel implementations
+  - `send(signals, metadata)`: Send notifications (returns bool)
+  - `format_message(signals)`: Format signals for channel
+  - `should_notify(signal, min_confidence)`: Check if signal meets threshold
+- `NotificationRouter(config, adapters)`: Routes signals to configured notification channels
+  - `send_notifications(signals, run_metadata)`: Send notifications through all enabled channels
+  - `_filter_signals_for_channel(signals, channel)`: Filter signals based on channel-specific thresholds
+  - Handles errors gracefully, logs delivery status
+- `adapters/discord.py`: Discord bot integration with rich embeds
+  - `DiscordAdapter(bot_token, channel_id, rate_limit_delay, timeout)`: Discord Bot API integration
+  - `send(signals, metadata)`: Send signals as individual Discord embeds
+  - `_create_embed(signal, metadata)`: Create Discord embed object (Green for LONG, Red for SHORT)
+  - `_format_confidence_bar(confidence)`: Visual confidence bar using Unicode blocks
+  - `_send_to_discord(embeds)`: Send embeds via Discord API with rate limiting and retry logic
+  - Handles 429 rate limits with exponential backoff
 - `adapters/console.py`: Rich console table output
-- `adapters/email.py`: SMTP email delivery with HTML templates
-- `adapters/webhook.py`: HTTP POST to user endpoints
-- `adapters/desktop.py`: Platform-specific toast notifications
-- Goal: Deliver signals through multiple channels with configurable thresholds
+  - `ConsoleAdapter(max_signals, output_format)`: Rich console table output
+  - `send(signals, metadata)`: Display signals in formatted Rich table
+  - `_display_summary_table(signals, metadata)`: Compact summary table with all signals
+  - `_display_detailed_table(signals, metadata)`: Detailed panel view per signal
+  - Supports "summary" and "detailed" output formats
+  - Color-coded confidence and alignment (green >0.7, yellow >0.5, dim <0.5)
+- Goal: Deliver signals through Discord (primary) and Console with rich formatting, proper error handling, and rate limiting
 
 **prediction/monitoring/** (Pending)
 - `PerformanceTracker(persistence)`: System performance monitoring

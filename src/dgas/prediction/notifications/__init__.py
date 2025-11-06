@@ -1,13 +1,23 @@
 """
-Notification system for multi-channel signal delivery.
+Notification system for delivering trading signals through multiple channels.
 
-Provides adapters for:
-- Console output (Rich formatted tables)
-- Email (SMTP with HTML templates)
-- Webhook (HTTP POST to user endpoints)
-- Desktop notifications (platform-specific)
+This module provides:
+- NotificationRouter for multi-channel signal delivery
+- NotificationAdapter abstract base for channel implementations
+- Discord adapter with rich embeds
+- Console adapter with Rich tables
 """
 
 from __future__ import annotations
 
-__all__: list[str] = []
+__all__ = [
+    "NotificationConfig",
+    "NotificationAdapter",
+    "NotificationRouter",
+    "DiscordAdapter",
+    "ConsoleAdapter",
+]
+
+from .router import NotificationConfig, NotificationAdapter, NotificationRouter
+from .adapters.discord import DiscordAdapter
+from .adapters.console import ConsoleAdapter
