@@ -33,6 +33,7 @@ from dgas.prediction.engine import GeneratedSignal, SignalType
 def mock_settings():
     """Create mock Settings object."""
     settings = Mock()
+    settings.scheduler_symbols = ["AAPL", "MSFT", "GOOGL"]
     settings.default_watchlist = ["AAPL", "MSFT", "GOOGL"]
     return settings
 
@@ -213,6 +214,7 @@ class TestGetSymbols:
     def test_no_symbols(self):
         """Test when no symbols are available."""
         settings = Mock()
+        settings.scheduler_symbols = None  # Explicitly set to None
         settings.default_watchlist = None
         args = Namespace(symbols=[], watchlist=None)
         console = Console()

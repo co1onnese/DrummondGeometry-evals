@@ -29,7 +29,7 @@
 
 ## Documentation Overview
 
-### Core Documentation (Week 3)
+### Core Documentation
 
 #### 1. API Documentation (1811 lines)
 **File**: `API_DOCUMENTATION.md`

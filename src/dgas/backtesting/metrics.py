@@ -240,11 +240,33 @@ def _trade_statistics(trades: Iterable[Trade]) -> dict[str, Decimal | int | None
     avg_loss = (sum(losses) / Decimal(len(losses))) if losses else None
 
     if wins and losses:
-        profit_factor = sum(wins) / abs(sum(losses))
+        total_wins = sum(wins)
+        total_losses = abs(sum(losses))
+        # Guard against division by zero
+        if total_losses > 0:
+            profit_factor = total_wins / total_losses
+        else:
+            profit_factor = Decimal("9999.9999")
     elif wins and not losses:
-        profit_factor = Decimal("Infinity")
+        # Cap infinity to max value for NUMERIC(8,4) field
+        profit_factor = Decimal("9999.9999")
     else:
         profit_factor = None
+
+    # Cap extreme values to prevent database overflow
+    def _cap_decimal(value: Decimal | None, max_val: Decimal = Decimal("9999.9999")) -> Decimal | None:
+        """Cap decimal values to prevent database overflow."""
+        if value is None:
+            return None
+        # Check for infinity
+        if value == Decimal("Infinity") or value > max_val:
+            return max_val
+        # Check for very small negative values
+        if value < -max_val:
+            return -max_val
+        return value
+
+    profit_factor = _cap_decimal(profit_factor)
 
     return {
         "total_trades": total_trades,

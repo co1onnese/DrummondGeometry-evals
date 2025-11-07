@@ -106,7 +106,8 @@ def run_predict_command(args: Namespace) -> int:
         if args.min_confidence is not None:
             config_overrides["min_confidence"] = args.min_confidence
 
-        settings = load_settings(config_file=args.config, **config_overrides)
+        config_file = getattr(args, 'config', None)
+        settings = load_settings(config_file=config_file, **config_overrides)
 
         # Show config source
         if settings.has_config_file:
@@ -217,7 +218,7 @@ def _get_symbols(args: Namespace, settings: Any, console: Console) -> List[str]:
             console.print(f"[yellow]Warning: Could not load watchlist: {e}[/yellow]")
 
     # Default watchlist from settings
-    if hasattr(settings, "scheduler_symbols"):
+    if hasattr(settings, "scheduler_symbols") and settings.scheduler_symbols:
         return settings.scheduler_symbols
     elif hasattr(settings, "default_watchlist") and settings.default_watchlist:
         return settings.default_watchlist

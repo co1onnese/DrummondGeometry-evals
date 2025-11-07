@@ -120,7 +120,7 @@ def test_persist_backtest_writes_results(monkeypatch: pytest.MonkeyPatch) -> Non
     insert_sql, params = cursor.executed[0]
     assert "INSERT INTO backtest_results" in insert_sql
     # Ensure JSON metadata includes strategy config overrides
-    json_param = params[21]
+    json_param = params[20]  # test_config is at index 20, completed_at is at 21
     config_payload = getattr(json_param, "obj", json_param)
     assert config_payload["note"] == "unit-test"
     assert config_payload["run_id"] == "test-1"

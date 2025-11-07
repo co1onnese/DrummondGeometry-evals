@@ -16,7 +16,7 @@
 
 ## Introduction
 
-The DGAS (Drummond Geometry Analysis System) Dashboard is a comprehensive web-based interface for monitoring predictions, signals, backtests, and system performance in real-time. This guide covers all features introduced in Week 4, including real-time streaming, notification system, custom dashboard builder, and advanced features.
+The DGAS (Drummond Geometry Analysis System) Dashboard is a comprehensive web-based interface for monitoring predictions, signals, backtests, and system performance in real-time. This guide covers all features including real-time streaming, notification system, custom dashboard builder, and advanced features.
 
 ### Key Features
 
@@ -790,45 +790,6 @@ Track and optimize dashboard performance:
 4. **Signals**: Trading signals
 5. **Backtests**: Strategy backtesting results
 6. **System Status**: Database and system metrics
-
----
-
-## Changelog
-
-### Week 4 Features (Current)
-
-**Day 1: Real-time Data Streaming**
-- WebSocket server implementation
-- Real-time client integration
-- Connection management
-- Event broadcasting
-
-**Day 2: Notification & Alert System**
-- 8 notification types
-- 4 priority levels
-- Alert rules engine
-- Configurable settings
-- Quiet hours
-
-**Day 3: Custom Dashboard Builder**
-- 3 widget types (Metric, Chart, Table)
-- 12-column grid layout
-- Auto-positioning
-- Save/load/export/import
-
-**Day 4: Advanced Features**
-- Filter preset system
-- Enhanced exports (CSV, Excel, JSON, PDF)
-- Performance optimization
-- Caching and monitoring
-
-### Previous Weeks
-
-**Weeks 1-3: Foundation**
-- Basic dashboard structure
-- Data pages
-- Database integration
-- Initial UI components
 
 ---
 

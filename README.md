@@ -86,7 +86,7 @@ dgas monitor --live
 ## Prerequisites
 
 - Python 3.11 managed via [uv](https://github.com/astral-sh/uv)
-- Local PostgreSQL instance (required from Phase 1 onward)
+- Local PostgreSQL instance
 - Valid EODHD ALL-IN-ONE API token
 
 ## Database Status
@@ -121,21 +121,22 @@ See [Full Universe Backfill Summary](docs/FULL_UNIVERSE_BACKFILL_SUMMARY.md) for
 
 ## Documentation
 
-### User Guide
-- **[User Guide](docs/DASHBOARD_USER_GUIDE.md)** - Complete dashboard usage guide
+### Getting Started
+- **[Dashboard User Guide](docs/DASHBOARD_USER_GUIDE.md)** - Complete dashboard usage guide
 - **[Feature Tutorials](docs/FEATURE_TUTORIALS.md)** - Step-by-step tutorials for all features
-- **[CLI Reference](docs/CLI_USAGE.md)** - Complete command documentation
+- **[CLI Usage](docs/CLI_USAGE.md)** - Complete command documentation
+- **[Configuration Guide](docs/CONFIGURE_COMMAND_GUIDE.md)** - System configuration
 
-### API Documentation
+### Reference Documentation
 - **[API Reference](docs/API_DOCUMENTATION.md)** - Complete API documentation
-- **[Dashboard Architecture](docs/PHASE5_WEEK3_DASHBOARD_PLAN.md)** - Dashboard design
-- **[Real-time Features](docs/PHASE5_WEEK4_DAYS1-4_COMPLETE.md)** - Week 4 implementation details
+- **[Drummond Geometry Reference](docs/DRUMMOND_GEOMETRY_REFERENCE.md)** - Methodology and concepts
+- **[Pattern Detection Reference](docs/PATTERN_DETECTION_REFERENCE.md)** - Pattern detection guide
+- **[Indicator Reference](docs/INDICATOR_REFERENCE.md)** - Technical indicators
 
-### Implementation Reports
-- **[Week 3 - Dashboard Foundation](docs/PHASE5_WEEK3_COMPLETION_SUMMARY.md)**
-- **[Week 4 - Real-time Features](docs/PHASE5_WEEK4_DAYS1-4_COMPLETE.md)**
-- **[Week 5 - Testing & Docs](docs/PHASE5_WEEK5_COMPLETION_SUMMARY.md)**
-- **[Final Status Report](docs/PHASE5_FINAL_STATUS_REPORT.md)**
+### Operations
+- **[Operational Runbook](docs/OPERATIONAL_RUNBOOK.md)** - System operations and troubleshooting
+- **[Performance Tuning Guide](docs/PERFORMANCE_TUNING_GUIDE.md)** - Performance optimization
+- **[Database Setup](docs/setup_postgres.md)** - PostgreSQL configuration
 
 ## Dependency Management with uv
 
@@ -162,27 +163,10 @@ See [Full Universe Backfill Summary](docs/FULL_UNIVERSE_BACKFILL_SUMMARY.md) for
 
 ## Repository Layout
 
-- `implementation_plan.md` - phased delivery roadmap
-- `prd/` - product requirement and design documents
-- `src/dgas/` - Python package source code (currently scaffolded)
-- `tests/` - automated tests
-- `.env.example` - template for local configuration
-- `docs/pattern_detection_reference.md` - narrative guide to Drummond Geometry pattern detectors
-- `docs/drummond_geometry_enhancement_plan.md` - upcoming refinement plan and detailed TODOs
+- `src/dgas/` - Python package source code
+- `tests/` - Automated test suite
+- `docs/` - User and reference documentation
+- `prd/` - Product requirement documents
+- `.env.example` - Template for local configuration
 
-Reference `docs/CLI_USAGE.md` for complete command documentation (analyze, backtest, data-report) and `docs/PHASE3_BACKTESTING_PLAN.md` for the Phase 3 architecture summary.
-
-Further setup and credential guidance will be refined as Phase 0 progresses.
-
-## Upcoming Enhancements
-
-The enhancement plan captured in `docs/drummond_geometry_enhancement_plan.md`
-details the next wave of improvements, including:
-
-- Clear documentation of why the PLdot volatility-based envelopes are the recommended default.
-- Refinements to Exhaust, C-Wave, and PLdot Refresh pattern detectors with richer confirmation.
-- Upgrades to multi-timeframe confluence, trading strategies, and prediction signals.
-- Benchmarking and calibration assets to quantify Drummond Geometry's edge versus traditional indicators.
-
-Analyst-facing documentation (see `docs/pattern_detection_reference.md`) will be
-kept current as each milestone lands.
+For detailed command usage, see [CLI Usage](docs/CLI_USAGE.md).

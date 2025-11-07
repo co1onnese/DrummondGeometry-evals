@@ -1291,7 +1291,7 @@ print(summary)
 
 ### What You've Learned
 
-**Week 4 Features Tutorial Series:**
+**Feature Tutorial Series:**
 
 1. ✅ **Getting Started**: Navigate and understand interface
 2. ✅ **Real-time Features**: WebSocket, live updates, connection management

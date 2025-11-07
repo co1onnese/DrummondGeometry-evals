@@ -18,6 +18,7 @@ from dgas.backtesting import (
 )
 from dgas.backtesting.metrics import PerformanceSummary
 from dgas.calculations.multi_timeframe import MultiTimeframeAnalysis
+from dgas.calculations.states import TrendDirection
 from dgas.data.models import IntervalData
 
 
@@ -217,6 +218,8 @@ class StubEngine:
     def run(self, dataset: BacktestDataset, strategy) -> BacktestResult:
         self.dataset = dataset
         self.strategy = strategy
+        # Call prepare to match real engine behavior
+        strategy.prepare([bar.bar for bar in dataset.bars])
         return self.result
 
 
@@ -242,6 +245,34 @@ def test_runner_loads_multi_timeframe_analysis(monkeypatch: pytest.MonkeyPatch) 
         return []
 
     monkeypatch.setattr("dgas.backtesting.data_loader.load_ohlcv", fake_load)
+
+    # Mock _build_multi_timeframe_snapshots to return indicators
+    def fake_build_snapshots(symbol, trading_interval, trading_bars, htf_interval, *, start=None, end=None, conn=None):
+        # Return indicator map with analysis for the last bar
+        if trading_bars:
+            last_bar = trading_bars[-1]
+            analysis = MultiTimeframeAnalysis(
+                timestamp=last_bar.timestamp,
+                htf_timeframe=htf_interval,
+                trading_timeframe=trading_interval,
+                ltf_timeframe=None,
+                htf_trend=TrendDirection.UP,
+                htf_trend_strength=0.7,
+                trading_tf_trend=TrendDirection.UP,
+                alignment=None,
+                pldot_overlay=None,
+                confluence_zones=[],
+                htf_patterns=[],
+                trading_tf_patterns=[],
+                pattern_confluence=0.0,
+                signal_strength=0.6,
+                risk_level="medium",
+                recommended_action="long",
+            )
+            return {last_bar.timestamp: {"analysis": analysis}}
+        return {}
+
+    monkeypatch.setattr("dgas.backtesting.data_loader._build_multi_timeframe_snapshots", fake_build_snapshots)
 
     test_result = _backtest_result(start)
     engine = StubEngine(test_result)
