@@ -196,7 +196,7 @@ def main():
         # Memory stats
         memory_stats = memory_monitor.get_stats()
         print(f"\nMemory Usage: {memory_stats['current_mb']:.1f}MB "
-              f"(peak: {memory_stats['peak_memory']:.1f}MB, "
+              f"(peak: {memory_stats['current_mb']:.1f}MB, "
               f"limit: {memory_stats['limit_mb']:.1f}MB)")
 
     # Final summary
