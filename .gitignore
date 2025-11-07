@@ -19,7 +19,7 @@ venv/
 .vscode/
 
 # Data & logs
-data/
+/data/
 logs/
 *.log
 
