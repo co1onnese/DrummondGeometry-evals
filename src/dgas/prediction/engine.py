@@ -9,11 +9,13 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..calculations.multi_timeframe import (
+    ConfluenceZone,
     MultiTimeframeAnalysis,
     MultiTimeframeCoordinator,
     TimeframeData,
-    ConfluenceZone,
 )
+from ..calculations import build_timeframe_data
+from ..calculations.patterns import PatternEvent, PatternType
 from ..calculations.states import TrendDirection
 from ..data.models import IntervalData
 
@@ -83,6 +85,8 @@ class SignalGenerator:
         min_signal_strength: float = 0.5,
         stop_loss_atr_multiplier: float = 1.5,
         target_rr_ratio: float = 2.0,
+        min_zone_weight: float = 2.5,
+        required_pattern_strength: int = 2,
     ):
         """
         Initialize signal generator.
@@ -99,6 +103,8 @@ class SignalGenerator:
         self.min_signal_strength = min_signal_strength
         self.stop_loss_atr_multiplier = stop_loss_atr_multiplier
         self.target_rr_ratio = target_rr_ratio
+        self.min_zone_weight = min_zone_weight
+        self.required_pattern_strength = required_pattern_strength
 
     def generate_signals(
         self,
@@ -126,14 +132,27 @@ class SignalGenerator:
         if not self._meets_minimum_criteria(analysis):
             return []
 
-        # Determine signal type based on entry rules
-        signal_type = self._apply_entry_rules(analysis)
+        direction = self._determine_direction(analysis)
+        if direction is None:
+            return []
+
+        signal_type = self._map_direction_to_signal(direction, analysis)
         if signal_type is None:
             return []
 
+        is_exit_signal = signal_type in (SignalType.EXIT_LONG, SignalType.EXIT_SHORT)
+
+        zone: Optional[ConfluenceZone] = None
+        if not is_exit_signal:
+            if not self._has_supporting_pattern(analysis, direction):
+                return []
+            zone = self._select_zone(analysis, direction)
+            if zone is None:
+                return []
+
         # Calculate entry, stop, and target levels
         entry_price, stop_loss, target_price = self._calculate_levels(
-            signal_type, analysis, trading_tf_data
+            signal_type, analysis, trading_tf_data, zone
         )
 
         # Calculate confidence score
@@ -194,58 +213,85 @@ class SignalGenerator:
         if not analysis.alignment.trade_permitted:
             return False
 
+        if not analysis.confluence_zones:
+            return False
+
+        top_zone = analysis.confluence_zones[0]
+        if float(top_zone.weighted_strength) < self.min_zone_weight:
+            return False
+
         return True
 
-    def _apply_entry_rules(
-        self,
-        analysis: MultiTimeframeAnalysis,
-    ) -> Optional[SignalType]:
-        """
-        Determine signal type based on entry rules.
-
-        Entry Rules (Multi-Timeframe Strategy):
-        - LONG: HTF trend UP + trading TF alignment ≥ threshold + price near support
-        - SHORT: HTF trend DOWN + trading TF alignment ≥ threshold + price near resistance
-        - EXIT: Alignment breaks below threshold OR risk level high
-
-        Args:
-            analysis: Multi-timeframe analysis
-
-        Returns:
-            Signal type or None if no signal
-        """
-        # Check for exit conditions first
-        if analysis.recommended_action == "reduce" or analysis.risk_level == "high":
-            # Determine which exit based on current HTF trend (exiting against trend)
-            if analysis.htf_trend == TrendDirection.UP:
-                return SignalType.EXIT_SHORT  # Exit if we were short
-            elif analysis.htf_trend == TrendDirection.DOWN:
-                return SignalType.EXIT_LONG  # Exit if we were long
+    def _determine_direction(self, analysis: MultiTimeframeAnalysis) -> Optional[TrendDirection]:
+        if float(analysis.alignment.alignment_score) < self.min_alignment_score:
+            return None
+        if float(analysis.signal_strength) < self.min_signal_strength:
+            return None
+        if not analysis.alignment.trade_permitted:
             return None
 
-        # Check for entry conditions
         if analysis.recommended_action == "long" and analysis.htf_trend == TrendDirection.UP:
-            # Additional validation: check for support confluence
-            if analysis.confluence_zones:
-                support_zones = [z for z in analysis.confluence_zones if z.zone_type == "support"]
-                if support_zones:
-                    return SignalType.LONG
+            return TrendDirection.UP
+        if analysis.recommended_action == "short" and analysis.htf_trend == TrendDirection.DOWN:
+            return TrendDirection.DOWN
 
-        elif analysis.recommended_action == "short" and analysis.htf_trend == TrendDirection.DOWN:
-            # Additional validation: check for resistance confluence
-            if analysis.confluence_zones:
-                resistance_zones = [z for z in analysis.confluence_zones if z.zone_type == "resistance"]
-                if resistance_zones:
-                    return SignalType.SHORT
-
-        # No signal if recommended action is "wait"
+        if analysis.recommended_action in {"reduce", "wait"} or analysis.risk_level == "high":
+            if analysis.htf_trend == TrendDirection.UP:
+                return TrendDirection.DOWN
+            if analysis.htf_trend == TrendDirection.DOWN:
+                return TrendDirection.UP
         return None
+
+    def _map_direction_to_signal(
+        self, direction: TrendDirection, analysis: MultiTimeframeAnalysis
+    ) -> Optional[SignalType]:
+        if direction == TrendDirection.UP and analysis.recommended_action == "long":
+            return SignalType.LONG
+        if direction == TrendDirection.DOWN and analysis.recommended_action == "short":
+            return SignalType.SHORT
+        if direction == TrendDirection.UP and analysis.recommended_action in {"reduce", "wait"}:
+            return SignalType.EXIT_SHORT
+        if direction == TrendDirection.DOWN and analysis.recommended_action in {"reduce", "wait"}:
+            return SignalType.EXIT_LONG
+        return None
+
+    def _select_zone(
+        self, analysis: MultiTimeframeAnalysis, direction: TrendDirection
+    ) -> Optional[ConfluenceZone]:
+        desired_type = "support" if direction == TrendDirection.UP else "resistance"
+        for zone in analysis.confluence_zones:
+            if zone.zone_type != desired_type:
+                continue
+            if float(zone.weighted_strength) >= self.min_zone_weight:
+                return zone
+        return None
+
+    def _has_supporting_pattern(
+        self, analysis: MultiTimeframeAnalysis, direction: TrendDirection
+    ) -> bool:
+        required_direction = 1 if direction == TrendDirection.UP else -1
+
+        def matches(event: PatternEvent) -> bool:
+            return (
+                event.direction == required_direction
+                and event.pattern_type in {
+                    PatternType.PLDOT_PUSH,
+                    PatternType.C_WAVE,
+                    PatternType.PLDOT_REFRESH,
+                }
+                and event.strength >= self.required_pattern_strength
+            )
+
+        return any(matches(event) for event in analysis.trading_tf_patterns) or any(
+            matches(event) for event in analysis.htf_patterns
+        )
 
     def _calculate_levels(
         self,
         signal_type: SignalType,
         analysis: MultiTimeframeAnalysis,
         trading_tf_data: TimeframeData,
+        zone: Optional[ConfluenceZone],
     ) -> tuple[Decimal, Decimal, Decimal]:
         """
         Calculate entry, stop loss, and target price levels.
@@ -270,50 +316,21 @@ class SignalGenerator:
             raise ValueError("No PLdot data available for entry calculation")
 
         current_pldot = trading_tf_data.pldot_series[-1]
-        entry_price = current_pldot.value
+        entry_price = zone.level if zone is not None else current_pldot.value
 
-        # Adjust entry to nearest confluence zone if available
-        if analysis.confluence_zones:
-            if signal_type == SignalType.LONG:
-                # For long, look for nearest support below current price
-                support_zones = [
-                    z for z in analysis.confluence_zones
-                    if z.zone_type == "support" and z.level <= entry_price
-                ]
-                if support_zones:
-                    # Use strongest support zone
-                    strongest = max(support_zones, key=lambda z: z.strength)
-                    entry_price = strongest.level
-
-            elif signal_type == SignalType.SHORT:
-                # For short, look for nearest resistance above current price
-                resistance_zones = [
-                    z for z in analysis.confluence_zones
-                    if z.zone_type == "resistance" and z.level >= entry_price
-                ]
-                if resistance_zones:
-                    # Use strongest resistance zone
-                    strongest = max(resistance_zones, key=lambda z: z.strength)
-                    entry_price = strongest.level
-
-        # Calculate stop loss based on envelope width (proxy for ATR)
-        if trading_tf_data.envelope_series:
-            latest_envelope = trading_tf_data.envelope_series[-1]
-            atr_proxy = latest_envelope.width
-        else:
-            # Fallback: use 2% of entry price
-            atr_proxy = entry_price * Decimal("0.02")
-
-        stop_distance = atr_proxy * Decimal(str(self.stop_loss_atr_multiplier))
+        buffer = max(zone.volatility, Decimal("0.001") * entry_price) if zone is not None else Decimal("0")
+        stop_buffer = buffer * Decimal(str(self.stop_loss_atr_multiplier))
 
         # Calculate stop and target based on signal direction
-        if signal_type == SignalType.LONG:
-            stop_loss = entry_price - stop_distance
-            target_price = entry_price + (stop_distance * Decimal(str(self.target_rr_ratio)))
+        if signal_type == SignalType.LONG and zone is not None:
+            stop_loss = zone.lower_bound - stop_buffer
+            risk = entry_price - stop_loss
+            target_price = entry_price + (risk * Decimal(str(self.target_rr_ratio)))
 
-        elif signal_type == SignalType.SHORT:
-            stop_loss = entry_price + stop_distance
-            target_price = entry_price - (stop_distance * Decimal(str(self.target_rr_ratio)))
+        elif signal_type == SignalType.SHORT and zone is not None:
+            stop_loss = zone.upper_bound + stop_buffer
+            risk = stop_loss - entry_price
+            target_price = entry_price - (risk * Decimal(str(self.target_rr_ratio)))
 
         elif signal_type in [SignalType.EXIT_LONG, SignalType.EXIT_SHORT]:
             # For exits, entry is current price, stop/target are N/A but set to entry
@@ -945,51 +962,7 @@ class PredictionEngine:
         Returns:
             TimeframeData with all indicators calculated
         """
-        from ..calculations import (
-            EnvelopeCalculator,
-            MarketStateClassifier,
-            PLDotCalculator,
-        )
-        from ..calculations.patterns import (
-            detect_c_wave,
-            detect_congestion_oscillation,
-            detect_exhaust,
-            detect_pldot_push,
-            detect_pldot_refresh,
-        )
-
-        # PLdot calculation
-        pldot_calc = PLDotCalculator(displacement=1)
-        pldot_series = pldot_calc.from_intervals(intervals)
-
-        # Envelope calculation
-        envelope_calc = EnvelopeCalculator(
-            method="pldot_range",
-            period=3,
-            multiplier=1.5
-        )
-        envelope_series = envelope_calc.from_intervals(intervals, pldot_series)
-
-        # Market state classification
-        state_classifier = MarketStateClassifier(slope_threshold=0.0001)
-        state_series = state_classifier.classify(intervals, pldot_series)
-
-        # Pattern detection
-        patterns = []
-        patterns.extend(detect_pldot_push(intervals, pldot_series))
-        patterns.extend(detect_pldot_refresh(intervals, pldot_series))
-        patterns.extend(detect_exhaust(intervals, pldot_series, envelope_series))
-        patterns.extend(detect_c_wave(envelope_series))
-        patterns.extend(detect_congestion_oscillation(envelope_series))
-
-        return TimeframeData(
-            timeframe=timeframe,
-            classification=classification,
-            pldot_series=pldot_series,
-            envelope_series=envelope_series,
-            state_series=state_series,
-            pattern_events=patterns,
-        )
+        return build_timeframe_data(intervals, timeframe, classification)
 
     def _signal_to_dict(self, signal: GeneratedSignal) -> Dict[str, Any]:
         """

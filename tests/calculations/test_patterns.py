@@ -3,6 +3,9 @@ from decimal import Decimal
 
 from dgas.calculations.envelopes import EnvelopeSeries
 from dgas.calculations.patterns import (
+    CWaveConfig,
+    ExhaustConfig,
+    PLDotRefreshConfig,
     PatternType,
     detect_c_wave,
     detect_congestion_oscillation,
@@ -14,7 +17,7 @@ from dgas.calculations.pldot import PLDotSeries
 from dgas.data.models import IntervalData
 
 
-def _make_interval(ts: datetime, close: float, high: float, low: float) -> IntervalData:
+def _make_interval(ts: datetime, close: float, high: float, low: float, volume: int = 1) -> IntervalData:
     payload = {
         "code": "AAPL",
         "exchange_short_name": "US",
@@ -23,7 +26,7 @@ def _make_interval(ts: datetime, close: float, high: float, low: float) -> Inter
         "high": high,
         "low": low,
         "close": close,
-        "volume": 1,
+        "volume": volume,
     }
     return IntervalData.from_api_record(payload, interval="30m")
 
@@ -87,6 +90,43 @@ def test_detect_pldot_refresh():
     assert events[0].pattern_type == PatternType.PLDOT_REFRESH
 
 
+def test_detect_pldot_refresh_respects_return_speed():
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    intervals = []
+    pldot_series = []
+
+    for i in range(6):
+        ts = base + timedelta(minutes=30 * i)
+        close = 12 if i < 5 else 10
+        intervals.append(_make_interval(ts, close=close, high=close + 1, low=close - 1))
+        pldot_series.append(_pldot_series(ts, value=10, slope=0.0))
+
+    config = PLDotRefreshConfig(base_tolerance=0.5, max_return_bars=3)
+    events = detect_pldot_refresh(intervals, pldot_series, config=config)
+
+    assert len(events) == 0
+
+
+def test_detect_pldot_refresh_confirmation_hook():
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    intervals = []
+    pldot_series = []
+
+    for i in range(5):
+        ts = base + timedelta(minutes=30 * i)
+        close = 12 if i < 3 else 10
+        intervals.append(_make_interval(ts, close=close, high=close + 1, low=close - 1))
+        pldot_series.append(_pldot_series(ts, value=10, slope=0.0))
+
+    def _reject_confirmation(ts: datetime, direction: int) -> bool:  # pragma: no cover - simple callback
+        return False
+
+    config = PLDotRefreshConfig(base_tolerance=0.5, confirmation=_reject_confirmation)
+    events = detect_pldot_refresh(intervals, pldot_series, config=config)
+
+    assert len(events) == 0
+
+
 def test_detect_c_wave():
     base = datetime(2024, 1, 1, tzinfo=timezone.utc)
     envelopes = [
@@ -96,6 +136,112 @@ def test_detect_c_wave():
     events = detect_c_wave(envelopes)
     assert events
     assert events[0].pattern_type == PatternType.C_WAVE
+
+
+def test_detect_c_wave_with_slope_and_expansion_filters():
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    envelopes = [
+        _envelope_series(
+            base + timedelta(minutes=30 * i),
+            center=10 + i * 0.4,
+            width=2.0 + i * 0.4,
+            position=0.95,
+        )
+        for i in range(4)
+    ]
+    pldot_series = [
+        _pldot_series(base + timedelta(minutes=30 * i), value=Decimal("10") + Decimal("0.3") * i, slope=0.05 + 0.02 * i)
+        for i in range(4)
+    ]
+
+    config = CWaveConfig(
+        min_bars=3,
+        min_slope=0.04,
+        min_slope_acceleration=0.03,
+        min_envelope_expansion=0.1,
+    )
+    events = detect_c_wave(envelopes, config=config, pldot=pldot_series)
+
+    assert events
+    assert events[0].pattern_type == PatternType.C_WAVE
+
+
+def test_detect_c_wave_requires_volume_confirmation():
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    lookback_intervals: list[IntervalData] = []
+    for offset, volume in zip(range(3, 0, -1), [90, 100, 110]):
+        ts = base - timedelta(minutes=30 * offset)
+        lookback_intervals.append(_make_interval(ts, close=10.0, high=10.5, low=9.5, volume=volume))
+
+    streak_envelopes = []
+    pldot_series = []
+    intervals = lookback_intervals[:]
+
+    for i in range(4):
+        ts = base + timedelta(minutes=30 * i)
+        envelopes_entry = _envelope_series(ts, center=10 + i * 0.3, width=2.0 + i * 0.3, position=0.95)
+        streak_envelopes.append(envelopes_entry)
+        pldot_series.append(_pldot_series(ts, value=Decimal("10") + Decimal("0.2") * i, slope=0.05 + 0.02 * i))
+
+        interval = _make_interval(
+            ts,
+            close=10.0 + i * 0.4,
+            high=10.5 + i * 0.4,
+            low=9.5 + i * 0.4,
+            volume=200 + i * 50,
+        )
+        intervals.append(interval)
+
+    config = CWaveConfig(
+        min_bars=3,
+        min_slope=0.04,
+        min_slope_acceleration=0.02,
+        min_envelope_expansion=0.05,
+        require_volume_confirmation=True,
+        volume_multiplier=1.2,
+        volume_lookback=3,
+    )
+
+    events = detect_c_wave(streak_envelopes, config=config, pldot=pldot_series, intervals=intervals)
+
+    assert events
+    assert events[0].pattern_type == PatternType.C_WAVE
+
+
+def test_detect_c_wave_rejects_when_volume_fails():
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    lookback_intervals: list[IntervalData] = []
+    for offset in range(3, 0, -1):
+        ts = base - timedelta(minutes=30 * offset)
+        lookback_intervals.append(_make_interval(ts, close=10.0, high=10.5, low=9.5, volume=210))
+
+    streak_envelopes = []
+    pldot_series = []
+    intervals = lookback_intervals[:]
+
+    for i in range(4):
+        ts = base + timedelta(minutes=30 * i)
+        streak_envelopes.append(_envelope_series(ts, center=10, width=2.0 + i * 0.2, position=0.95))
+        pldot_series.append(_pldot_series(ts, value=Decimal("10") + Decimal("0.2") * i, slope=0.05 + 0.01 * i))
+        interval = _make_interval(
+            ts,
+            close=10.0 + i * 0.2,
+            high=10.5 + i * 0.2,
+            low=9.5 + i * 0.2,
+            volume=180,
+        )
+        intervals.append(interval)
+
+    config = CWaveConfig(
+        min_bars=3,
+        require_volume_confirmation=True,
+        volume_multiplier=1.3,
+        volume_lookback=3,
+    )
+
+    events = detect_c_wave(streak_envelopes, config=config, pldot=pldot_series, intervals=intervals)
+
+    assert len(events) == 0
 
 
 def test_detect_congestion_oscillation():
@@ -122,31 +268,17 @@ def test_detect_exhaust_bullish_extension():
     upper = center + width / 2  # 101.0
     lower = center - width / 2  # 99.0
     
-    # Keep center constant for simplicity
-    # First bar: price within envelope
-    ts = base
-    intervals.append(_make_interval(ts, close=100.0, high=100.5, low=99.5))
-    pldot_series.append(_pldot_series(ts, value=center, slope=0.1))
-    envelopes.append(_envelope_series(ts, center=center, width=width, position=0.5))
-    
-    # Second bar: price extends above upper envelope
-    # Close = 105.0, upper = 101.0, extension = (105.0 - 101.0) / 2.0 = 2.0 (meets threshold)
-    ts = base + timedelta(minutes=30)
-    intervals.append(_make_interval(ts, close=105.0, high=105.5, low=104.5))
-    pldot_series.append(_pldot_series(ts, value=center, slope=0.1))  # Keep center same
-    envelopes.append(_envelope_series(ts, center=center, width=width, position=1.0))
-    
-    # Third bar: still extended (above upper)
-    ts = base + timedelta(minutes=60)
-    intervals.append(_make_interval(ts, close=105.5, high=106.0, low=105.0))
-    pldot_series.append(_pldot_series(ts, value=center, slope=0.1))  # Keep center same
-    envelopes.append(_envelope_series(ts, center=center, width=width, position=1.0))
-    
-    # Fourth bar: price returns to within envelope (exhaust detected)
-    ts = base + timedelta(minutes=90)
-    intervals.append(_make_interval(ts, close=100.0, high=100.5, low=99.5))  # Back within envelope
-    pldot_series.append(_pldot_series(ts, value=center, slope=0.1))  # Keep center same
-    envelopes.append(_envelope_series(ts, center=center, width=width, position=0.5))
+    slopes = [0.18, 0.16, 0.12, -0.05]
+    closes = [100.0, 105.0, 105.5, 100.0]
+    highs = [100.5, 105.5, 106.0, 100.5]
+    lows = [99.5, 104.5, 105.0, 99.5]
+
+    for idx, slope in enumerate(slopes):
+        ts = base + timedelta(minutes=30 * idx)
+        intervals.append(_make_interval(ts, close=closes[idx], high=highs[idx], low=lows[idx]))
+        pldot_series.append(_pldot_series(ts, value=center, slope=slope))
+        position = 1.0 if idx in (1, 2) else 0.5
+        envelopes.append(_envelope_series(ts, center=center, width=width, position=position))
     
     events = detect_exhaust(intervals, pldot_series, envelopes, extension_threshold=2.0)
     
@@ -168,34 +300,17 @@ def test_detect_exhaust_bearish_extension():
     
     center = 100.0
     width = 2.0
-    upper = center + width / 2  # 101.0
-    lower = center - width / 2  # 99.0
-    
-    # Keep center constant
-    # First bar: within envelope
-    ts = base
-    intervals.append(_make_interval(ts, close=100.0, high=100.5, low=99.5))
-    pldot_series.append(_pldot_series(ts, value=center, slope=-0.1))
-    envelopes.append(_envelope_series(ts, center=center, width=width, position=0.5))
-    
-    # Second bar: extends below lower envelope
-    # Close = 95.0, lower = 99.0, extension = (99.0 - 95.0) / 2.0 = 2.0 (meets threshold)
-    ts = base + timedelta(minutes=30)
-    intervals.append(_make_interval(ts, close=95.0, high=95.5, low=94.5))
-    pldot_series.append(_pldot_series(ts, value=center, slope=-0.1))  # Keep center same
-    envelopes.append(_envelope_series(ts, center=center, width=width, position=0.0))
-    
-    # Third bar: still extended (below lower)
-    ts = base + timedelta(minutes=60)
-    intervals.append(_make_interval(ts, close=94.5, high=95.0, low=94.0))
-    pldot_series.append(_pldot_series(ts, value=center, slope=-0.1))  # Keep center same
-    envelopes.append(_envelope_series(ts, center=center, width=width, position=0.0))
-    
-    # Fourth bar: price returns to within envelope (exhaust detected)
-    ts = base + timedelta(minutes=90)
-    intervals.append(_make_interval(ts, close=100.0, high=100.5, low=99.5))  # Back within envelope
-    pldot_series.append(_pldot_series(ts, value=center, slope=-0.1))  # Keep center same
-    envelopes.append(_envelope_series(ts, center=center, width=width, position=0.5))
+    slopes = [-0.18, -0.16, -0.12, 0.06]
+    closes = [100.0, 95.0, 94.5, 100.0]
+    highs = [100.5, 95.5, 95.0, 100.5]
+    lows = [99.5, 94.5, 94.0, 99.5]
+
+    for idx, slope in enumerate(slopes):
+        ts = base + timedelta(minutes=30 * idx)
+        intervals.append(_make_interval(ts, close=closes[idx], high=highs[idx], low=lows[idx]))
+        pldot_series.append(_pldot_series(ts, value=center, slope=slope))
+        position = 0.0 if idx in (1, 2) else 0.5
+        envelopes.append(_envelope_series(ts, center=center, width=width, position=position))
     
     events = detect_exhaust(intervals, pldot_series, envelopes, extension_threshold=2.0)
     
@@ -259,4 +374,58 @@ def test_detect_exhaust_extension_insufficient_bars():
     events = detect_exhaust(intervals, pldot_series, envelopes, extension_threshold=2.0)
     
     # Only 1 bar of extension - should not create exhaust event
+    assert len(events) == 0
+
+
+def test_detect_exhaust_requires_slope_reversal():
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    center = 100.0
+    width = 2.0
+
+    intervals = []
+    pldot_series = []
+    envelopes = []
+
+    slopes = [0.18, 0.16, 0.12, 0.08]
+    closes = [100.0, 105.0, 105.5, 100.0]
+    highs = [100.5, 105.5, 106.0, 100.5]
+    lows = [99.5, 104.5, 105.0, 99.5]
+
+    for idx, slope in enumerate(slopes):
+        ts = base + timedelta(minutes=30 * idx)
+        intervals.append(_make_interval(ts, close=closes[idx], high=highs[idx], low=lows[idx]))
+        pldot_series.append(_pldot_series(ts, value=center, slope=slope))
+        position = 1.0 if idx in (1, 2) else 0.5
+        envelopes.append(_envelope_series(ts, center=center, width=width, position=position))
+
+    config = ExhaustConfig(extension_threshold=2.0, slope_reversal_limit=0.0)
+    events = detect_exhaust(intervals, pldot_series, envelopes, config=config)
+
+    assert len(events) == 0
+
+
+def test_detect_exhaust_requires_reversion_ratio():
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    center = 100.0
+    width = 2.0
+
+    intervals = []
+    pldot_series = []
+    envelopes = []
+
+    slopes = [0.2, 0.18, 0.16, -0.05]
+    closes = [100.0, 105.0, 105.5, 104.8]
+    highs = [100.5, 105.5, 106.0, 105.0]
+    lows = [99.5, 104.5, 105.0, 104.5]
+
+    for idx, slope in enumerate(slopes):
+        ts = base + timedelta(minutes=30 * idx)
+        intervals.append(_make_interval(ts, close=closes[idx], high=highs[idx], low=lows[idx]))
+        pldot_series.append(_pldot_series(ts, value=center, slope=slope))
+        position = 1.0 if idx in (1, 2) else 0.6
+        envelopes.append(_envelope_series(ts, center=center, width=width, position=position))
+
+    config = ExhaustConfig(extension_threshold=2.0, min_reversion_ratio=0.6)
+    events = detect_exhaust(intervals, pldot_series, envelopes, config=config)
+
     assert len(events) == 0

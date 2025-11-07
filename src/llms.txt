@@ -2,9 +2,10 @@
 # LLM-Optimized Codebase Reference
 
 ## Project Overview
-Local-first market data ingestion and Drummond Geometry analysis toolkit implementing multi-timeframe coordination for trading signals.
-Phases: (0) scaffolding, (1) data pipeline, (2) calculations & multi-timeframe, (3) backtesting.
-Stack: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI formatting).
+Local-first market data ingestion and Drummond Geometry analysis toolkit implementing multi-timeframe coordination for trading signals. Production-ready system with prediction engine, real-time dashboard, CLI tools, and performance optimizations.
+
+**Phases**: (0) scaffolding, (1) data pipeline, (2) calculations & multi-timeframe, (3) backtesting, (4) prediction system, (5) dashboard, (6) optimization
+**Stack**: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI), streamlit (dashboard), apscheduler (scheduling)
 
 ---
 
@@ -15,15 +16,54 @@ Stack: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI formatting).
 - `get_version() -> str`: Return installed package version via importlib.metadata
 
 **dgas/__main__.py**
-- `build_parser() -> ArgumentParser`: CLI structure with subcommands (analyze, data-report, --version)
+- `build_parser() -> ArgumentParser`: CLI structure with subcommands (analyze, backtest, configure, data, predict, report, scheduler, status, monitor, data-report)
 - `main(argv: list[str] | None) -> int`: Route to subcommands or --version
-- Goal: CLI orchestration for analysis and reporting
+- `_parse_key_value_pairs(items: list[str]) -> dict[str, str]`: Parse key=value strategy params
+- Goal: CLI orchestration for all system operations
 
 **dgas/settings.py**
 - `Settings(BaseSettings)`: Pydantic config loader
   - Fields: `eodhd_api_token: str | None`, `database_url: str`, `data_dir: Path`, `eodhd_requests_per_minute: int`
 - `get_settings() -> Settings`: Cached singleton via @lru_cache
 - Goal: Centralized env-based configuration with .env support
+
+---
+
+### Configuration System
+**dgas/config/schema.py**
+- `DatabaseConfig(BaseModel)`: url, pool_size, echo
+- `SchedulerConfig(BaseModel)`: symbols, cron_expression, timezone, market_hours_only
+- `PredictionConfig(BaseModel)`: min_confidence, min_signal_strength, stop_loss_atr_multiplier, target_atr_multiplier
+- `DiscordConfig(BaseModel)`: enabled, webhook_url
+- `ConsoleConfig(BaseModel)`: enabled
+- `NotificationConfig(BaseModel)`: discord, console
+- `MonitoringConfig(BaseModel)`: sla_p95_latency_ms, sla_error_rate_pct, sla_uptime_pct
+- `DashboardConfig(BaseModel)`: port, theme, auto_refresh_seconds
+- `DGASConfig(BaseModel)`: Root config combining all sub-configs
+- Goal: Typed configuration schema with validation
+
+**dgas/config/loader.py**
+- `ConfigLoader(config_path: Path | None)`: Load and merge config from multiple sources
+  - `find_config_file() -> Path | None`: Search default paths (/etc/dgas, ~/.config/dgas, ./)
+  - `load_file(path: Path) -> dict[str, Any]`: Load YAML/JSON with env var expansion
+  - `load() -> DGASConfig`: Load and validate config
+  - `reload() -> DGASConfig`: Force reload
+  - `save(config: DGASConfig, path: Path, format: str) -> None`: Save config to file
+  - `generate_sample_config(path: Path, template: str) -> None`: Generate sample configs
+- `load_config(config_path: Path | None) -> DGASConfig`: Convenience function
+- Goal: Multi-source config loading (CLI > file > env > defaults)
+
+**dgas/config/adapter.py**
+- `UnifiedSettings(config_file: Path | None, config_overrides: dict[str, Any] | None)`: Bridge DGASConfig and legacy Settings
+  - Properties: database_url, database_pool_size, scheduler_symbols, prediction_min_confidence, notifications_*, monitoring_*, dashboard_*, eodhd_api_token, data_dir, eodhd_requests_per_minute
+  - `to_dict() -> dict[str, Any]`: Convert to dictionary
+- `load_settings(config_file: Path | None, **overrides: Any) -> UnifiedSettings`: Convenience function
+- Goal: Unified interface for new config files and legacy environment variables
+
+**dgas/config/validators.py**
+- `expand_env_vars_in_dict(data: dict) -> dict`: Expand ${VAR} in config values
+- `validate_config_file(path: Path) -> None`: Validate file exists and is readable
+- Goal: Config validation and environment variable expansion
 
 ---
 
@@ -48,29 +88,63 @@ Stack: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI formatting).
   - `get_pattern_events(symbol: str, interval_type: str, pattern_type: PatternType | None, start_time: datetime | None, end_time: datetime | None, limit: int) -> List[PatternEvent]`
   - `save_multi_timeframe_analysis(symbol: str, analysis: MultiTimeframeAnalysis) -> int`
   - `get_latest_multi_timeframe_analysis(symbol: str, htf_interval: str, trading_interval: str) -> dict | None`
-- Goal: CRUD operations for Drummond calculations (states, patterns, multi-timeframe analysis)
+- Goal: CRUD operations for Drummond calculations
 
-**dgas/migrations/001_initial_schema.sql**
-- Tables: market_symbols, market_data, market_data_metadata, pldot_calculations, envelope_bands, drummond_lines, market_state, trading_signals, backtest_results, backtest_trades
-- Constraints: OHLC relationships, positive prices/volume, unique timestamps
-- Indexes: symbol+timestamp DESC for fast range queries
-- Goal: Full schema for ingestion, geometry calcs, signals, backtesting
+**dgas/db/connection_pool.py**
+- `PooledConnectionManager(settings: Settings | None)`: Manages PostgreSQL connection pool
+  - `initialize_pool(min_size: int, max_size: int, max_inactive_connection_lifetime: float) -> None`
+  - `get_pool() -> ConnectionPool`: Get pool instance
+  - `get_connection() -> Generator[psycopg.Connection, None, None]`: Context manager for pooled connection
+  - `initialize_async_pool(...) -> None`: Initialize async pool
+  - `get_async_pool() -> AsyncConnectionPool`: Get async pool
+  - `close_pool() -> None`: Close pool
+  - `get_stats() -> dict[str, int]`: Pool statistics
+- `get_pool_manager() -> PooledConnectionManager`: Global singleton
+- `get_db_connection() -> Generator[psycopg.Connection, None, None]`: Convenience function
+- Goal: Connection pooling for improved performance
 
-**dgas/migrations/002_enhanced_states_patterns.sql**
-- Tables: market_states_v2, pattern_events, multi_timeframe_analysis, confluence_zones
-- Enhanced state classification with confidence scores, trend direction, PLdot slope tracking
-- Pattern events: PLDOT_PUSH, PLDOT_REFRESH, EXHAUST, C_WAVE, CONGESTION_OSCILLATION
-- Multi-timeframe analysis with alignment scores, PLdot overlay, signal strength
-- Goal: Support Phase 2 enhanced state classification and pattern detection
+**dgas/db/enhanced_persistence.py**
+- `OptimizedPredictionPersistence(settings: Settings | None)`: Enhanced persistence with caching and profiling
+  - Extends `PredictionPersistence` with connection pooling, query caching, performance monitoring
+  - `get_recent_runs(limit: int, status: str | None, use_cache: bool, cache_ttl_seconds: int) -> List[dict]`
+  - `get_recent_signals(symbol: str | None, lookback_hours: int, min_confidence: float | None, limit: int, use_cache: bool, cache_ttl_seconds: int) -> List[dict]`
+  - `get_metrics(metric_type: str | None, lookback_hours: int, aggregation_period: str | None, limit: int, use_cache: bool, cache_ttl_seconds: int) -> List[dict]`
+  - `_execute_with_profiling(query_name: str, query_func: callable) -> Any`: Profile query execution
+- Goal: Performance-optimized persistence with caching and monitoring
 
-**dgas/migrations/004_exchange_calendar.sql** (COMPLETED Week 3)
-- Tables: exchanges, market_holidays, trading_days
-- exchanges: Exchange metadata (timezone, market_open/close times, country, currency, sync tracking)
-- market_holidays: Holiday and half-day schedules with early_close_time support
-- trading_days: Pre-computed trading calendar with actual_close times for half-days
-- Indexes: exchange_code on all tables, trading_date on trading_days for range queries
-- CHECK constraints: Validate early_close < market_close, actual_close <= market_close
-- Goal: Database-backed trading calendar from EODHD for market hours logic
+**dgas/db/query_cache.py**
+- `CacheEntry(result: Any, timestamp: float, ttl_seconds: int, hit_count: int)`: Cached query result
+  - `is_expired: bool`: Check if expired
+- `QueryCache(max_size: int)`: In-memory query result cache
+  - `get(query: str, params: tuple) -> Any | None`: Get cached result
+  - `set(query: str, params: tuple, result: Any, ttl_seconds: int) -> None`: Cache result
+  - `invalidate(query: str, params: tuple) -> None`: Remove entry
+  - `clear() -> int`: Clear all entries
+  - `get_stats() -> dict[str, Any]`: Cache statistics
+- `CacheManager`: Manages multiple named caches
+  - `get_cache(name: str) -> QueryCache | None`: Get or create named cache
+  - `clear_all() -> None`: Clear all caches
+- `get_cache_manager() -> CacheManager`: Global singleton
+- Goal: Query result caching to reduce database load
+
+**dgas/db/performance_monitor.py**
+- `QueryMetrics(query: str, execution_time_ms: float, row_count: int, success: bool, error_message: str | None)`: Query performance metrics
+- `PerformanceMonitor`: Tracks query performance
+  - `record_query(query: str, execution_time_ms: float, row_count: int, success: bool, error_message: str | None) -> None`
+  - `get_summary(lookback_minutes: int) -> dict[str, Any]`: Aggregate statistics
+  - `get_slow_queries(limit: int) -> List[QueryMetrics]`: Find slowest queries
+- `profile_query(monitor: PerformanceMonitor, query_name: str)`: Decorator for query profiling
+- `get_performance_monitor() -> PerformanceMonitor`: Global singleton
+- Goal: Query performance tracking and optimization
+
+**dgas/db/optimizer.py**
+- Database query optimization utilities
+- Goal: Query optimization and index recommendations
+
+**dgas/migrations/001_initial_schema.sql**: Core schema (market_symbols, market_data, pldot_calculations, envelope_bands, drummond_lines, market_state, trading_signals, backtest_results, backtest_trades)
+**dgas/migrations/002_enhanced_states_patterns.sql**: Enhanced states and patterns (market_states_v2, pattern_events, multi_timeframe_analysis, confluence_zones)
+**dgas/migrations/003_prediction_system.sql**: Prediction tables (prediction_runs, generated_signals, prediction_metrics, scheduler_state)
+**dgas/migrations/004_exchange_calendar.sql**: Trading calendar (exchanges, market_holidays, trading_days)
 
 ---
 
@@ -79,8 +153,7 @@ Stack: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI formatting).
 - `IntervalData(BaseModel)`: Immutable OHLCV bar
   - Fields: symbol, exchange, timestamp (UTC), interval, open/high/low/close (Decimal), adjusted_close, volume (int)
   - Validators: `_parse_timestamp`, `_to_decimal`, `_to_int`
-  - Factories: `from_api_record(record: Dict, interval: str, symbol_override: str | None) -> IntervalData`
-  - `from_api_list(records: Iterable[Dict], interval: str, symbol_override: str | None) -> List[IntervalData]`
+  - Factories: `from_api_record(record: Dict, interval: str, symbol_override: str | None) -> IntervalData`, `from_api_list(records: Iterable[Dict], interval: str, symbol_override: str | None) -> List[IntervalData]`
 - Goal: Normalized representation of market bars with type safety
 
 **dgas/data/errors.py**
@@ -89,7 +162,7 @@ Stack: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI formatting).
 
 **dgas/data/rate_limiter.py**
 - `RateLimiter(max_calls: int, period: float, now_func: Callable | None, sleep_func: Callable | None)`
-  - Method: `acquire() -> None`: Block until call permitted (token bucket)
+  - `acquire() -> None`: Block until call permitted (token bucket)
 - Goal: Client-side throttling to respect EODHD rate limits
 
 **dgas/data/client.py**
@@ -116,9 +189,9 @@ Stack: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI formatting).
 - `bulk_upsert_market_data(conn: Connection, symbol_id: int, interval: str, data: Sequence[IntervalData]) -> int`: Bulk upsert OHLCV bars
 - `get_latest_timestamp(conn: Connection, symbol_id: int, interval: str) -> datetime | None`: Most recent timestamp
 - `ensure_symbols_bulk(conn: Connection, symbols: Iterable[tuple[str, str]]) -> dict[str, int]`: Batch symbol creation
-- `get_symbol_id(conn: Connection, symbol: str) -> int | None`: Look up registered symbols without creating them
-- `fetch_market_data(conn: Connection, symbol: str, interval: str, *, start: datetime | None = None, end: datetime | None = None, limit: int | None = None) -> list[IntervalData]`: Chronological OHLCV retrieval for backtests
-- Goal: Database CRUD operations for symbols and OHLCV bars (upsert on conflict) plus read helpers for analytics/backtesting
+- `get_symbol_id(conn: Connection, symbol: str) -> int | None`: Look up registered symbols
+- `fetch_market_data(conn: Connection, symbol: str, interval: str, *, start: datetime | None = None, end: datetime | None = None, limit: int | None = None) -> list[IntervalData]`: Chronological OHLCV retrieval
+- Goal: Database CRUD operations for symbols and OHLCV bars
 
 **dgas/data/ingestion.py**
 - `IngestionSummary(symbol, interval, fetched, stored, quality, start, end)`
@@ -127,6 +200,14 @@ Stack: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI formatting).
 - `backfill_many(symbols: Sequence[tuple[str, str]], *, start_date: str, end_date: str, interval: str, client: EODHDClient | None) -> List[IngestionSummary]`
 - Helper: `_client_context(client | None)`: Manage client lifecycle
 - Goal: Orchestrate historical backfill and incremental updates with quality checks
+
+**dgas/data/exchange_calendar.py**
+- `ExchangeCalendar(settings, use_cache)`: EODHD exchange API integration
+  - `fetch_exchange_details(exchange_code: str, from_date: str, to_date: str) -> dict`: Fetch exchange metadata
+  - `sync_exchange_calendar(exchange_code: str, force_refresh: bool) -> None`: Sync calendar to database (6 months back/forward)
+  - `is_trading_day(exchange_code: str, check_date: datetime) -> bool`: Check if date is trading day
+  - `get_trading_hours(exchange_code: str, check_date: datetime) -> dict`: Get market open/close times including half-days
+- Goal: Database-backed trading calendar from EODHD
 
 ---
 
@@ -168,15 +249,15 @@ Stack: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI formatting).
   - `detect_pldot_push(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries]) -> List[PatternEvent]`: 3+ bars where close and PLdot slope align
   - `detect_pldot_refresh(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries], tolerance: float = 0.1) -> List[PatternEvent]`: Price far from PLdot then returns
   - `detect_exhaust(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries], envelopes: Sequence[EnvelopeSeries], extension_threshold: float = 2.0) -> List[PatternEvent]`: Price extends beyond envelope then reverses
-  - `detect_c_wave(envelopes: Sequence[EnvelopeSeries]) -> List[PatternEvent]`: 3+ bars at envelope extremes (position >= 0.9 or <= 0.1)
+  - `detect_c_wave(envelopes: Sequence[EnvelopeSeries], pldot: Sequence[PLDotSeries] | None, intervals: Sequence[IntervalData] | None) -> List[PatternEvent]`: 3+ bars at envelope extremes (position >= 0.9 or <= 0.1)
   - `detect_congestion_oscillation(envelopes: Sequence[EnvelopeSeries]) -> List[PatternEvent]`: 4+ bars oscillating in middle envelope region (0.2-0.8)
 - Goal: Detect Drummond Geometry pattern events
 
 **dgas/calculations/multi_timeframe.py**
 - `TimeframeType(Enum)`: HIGHER, TRADING, LOWER
-- `TimeframeData(timeframe, classification, pldot_series, envelope_series, state_series, pattern_events)`: Frozen dataclass
+- `TimeframeData(timeframe, classification, pldot_series, envelope_series, state_series, pattern_events, drummond_zones)`: Frozen dataclass
 - `PLDotOverlay(timestamp, htf_timeframe, htf_pldot_value, htf_slope, ltf_timeframe, ltf_pldot_value, distance_percent, position)`: Frozen dataclass
-- `ConfluenceZone(level, upper_bound, lower_bound, strength, timeframes, zone_type, first_touch, last_touch)`: Frozen dataclass
+- `ConfluenceZone(level, upper_bound, lower_bound, strength, timeframes, zone_type, first_touch, last_touch, weighted_strength, sources, volatility)`: Frozen dataclass
 - `TimeframeAlignment(timestamp, htf_state, htf_direction, htf_confidence, trading_tf_state, trading_tf_direction, trading_tf_confidence, alignment_score, alignment_type, trade_permitted)`: Frozen dataclass
 - `MultiTimeframeAnalysis(timestamp, htf_timeframe, trading_timeframe, ltf_timeframe, htf_trend, htf_trend_strength, trading_tf_trend, alignment, pldot_overlay, confluence_zones, htf_patterns, trading_tf_patterns, pattern_confluence, signal_strength, risk_level, recommended_action)`: Frozen dataclass
 - `MultiTimeframeCoordinator(htf_timeframe: str, trading_timeframe: str, ltf_timeframe: str | None, confluence_tolerance_pct: float = 0.5, alignment_threshold: float = 0.6)`
@@ -185,72 +266,394 @@ Stack: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI formatting).
   - Calculates signal strength (0.0-1.0) and recommends action (long/short/wait/reduce)
 - Goal: Multi-timeframe coordination - core Drummond methodology (HTF defines trend, trading TF provides entries)
 
-### Backtesting Engine
-**dgas/backtesting/entities.py**
-- `SimulationConfig`, `Signal`, `Position`, `Trade`, `PortfolioSnapshot`, `BacktestResult`: Immutable dataclasses describing strategy directives, open positions, fills, and equity snapshots
-- Goal: Common data structures shared across engine, metrics, persistence, and reporting
+**dgas/calculations/timeframe_builder.py**
+- `build_timeframe_data(intervals: Sequence[IntervalData], timeframe: str, classification: TimeframeType) -> TimeframeData`
+  - Constructs complete TimeframeData with all indicators (PLdot, envelopes, states, patterns, Drummond zones)
+- Goal: Convenience function to build complete timeframe analysis
 
-**dgas/backtesting/data_loader.py**
-- `load_ohlcv(symbol, interval, *, start=None, end=None, limit=None, conn=None) -> list[IntervalData]`: Fetch chronological OHLCV bars via repository helpers
-- `load_dataset(symbol, interval, *, start=None, end=None, include_indicators=True, limit=None, conn=None) -> BacktestDataset`: Bundle bars plus optional indicator snapshots
-- Goal: Provide deterministic, ready-to-simulate datasets for each symbol/interval
+**dgas/calculations/cache.py**
+- `CacheKey(calculation_type: str, symbol: str, timeframe: str, parameters: dict, data_hash: str)`: Cache key representation
+  - `to_string() -> str`: Convert to hash string
+- `CachedResult(result: Any, timestamp: float, ttl_seconds: int, hit_count: int, computation_time_ms: float)`: Cached calculation result
+  - `is_expired: bool`, `age_seconds: float`
+- `CalculationCache(max_size: int, default_ttl_seconds: int)`: Specialized cache for calculations
+  - `get(key: CacheKey) -> Any | None`: Get cached result
+  - `set(key: CacheKey, result: Any, ttl_seconds: int | None) -> None`: Cache result
+  - `invalidate(key: CacheKey) -> None`: Remove entry
+  - `invalidate_by_pattern(pattern: str) -> int`: Remove matching entries
+  - `clear_expired() -> int`: Remove expired entries
+  - `clear() -> int`: Clear all entries
+  - `get_stats() -> dict[str, Any]`: Cache statistics
+- `get_calculation_cache() -> CalculationCache`: Global singleton
+- Goal: Calculation result caching for performance optimization
 
-**dgas/backtesting/engine.py**
-- `SimulationEngine(SimulationConfig | None)`: Deterministic execution core handling order sizing, commission/slippage, position management, equity curve tracking, and forced liquidation at end of dataset
-- `run(dataset: BacktestDataset, strategy: BaseStrategy) -> BacktestResult`: Execute strategy signals bar-by-bar
-- Goal: Reusable simulation kernel for all strategies
+**dgas/calculations/cache_manager.py**
+- `InvalidationRule(pattern: str, trigger: str, ttl_seconds: int, max_entries: int | None)`: Cache invalidation rule
+- `CacheInvalidationManager(cache: CalculationCache | None)`: Manages intelligent cache invalidation
+  - `add_rule(rule: InvalidationRule) -> None`
+  - `add_time_based_rule(pattern: str, ttl_seconds: int) -> None`
+  - `add_data_change_rule(pattern: str, max_entries: int) -> None`
+  - `invalidate_by_pattern(pattern: str) -> int`: Manual invalidation
+  - `invalidate_expired() -> int`: Remove expired entries
+  - `cleanup() -> dict[str, int]`: Run periodic cleanup
+  - `should_invalidate(cache_key: str, last_updated: float) -> bool`: Check if should invalidate
+  - `register_data_update(symbol: str, timeframe: str) -> None`: Invalidate on data update
+  - `get_cache_stats() -> dict[str, Any]`: Comprehensive statistics
+- `DataUpdateListener(invalidation_manager: CacheInvalidationManager | None)`: Listener for data updates
+  - `on_data_ingested(symbol: str, timeframe: str, bars_count: int, latest_timestamp: datetime) -> None`
+- `invalidate_calculation_cache(calculation_type: str, symbol: str | None, timeframe: str | None) -> int`: Convenience function
+- `invalidate_all_caches() -> int`: Clear all caches
+- `get_invalidation_manager() -> CacheInvalidationManager`: Global singleton
+- Goal: Intelligent cache invalidation strategies
 
-**dgas/backtesting/strategies/**
-- `base.py`: `StrategyConfig` (pydantic), `StrategyContext`, `BaseStrategy`, `rolling_history()` helper deque
-- `multi_timeframe.py`: `MultiTimeframeStrategy` and config ? simple momentum-style placeholder matching CLI default
-- `registry.py`: `STRATEGY_REGISTRY` mapping names to classes; `instantiate_strategy(name, params)` builds configured strategies from CLI overrides
-- Goal: Pluggable strategy framework with registry-based discovery
+**dgas/calculations/profiler.py**
+- `CalculationMetrics(calculation_type: str, symbol: str, timeframe: str, execution_time_ms: float, success: bool, timestamp: float, cache_hit: bool)`: Calculation metrics
+- `CalculationProfiler`: Profile Drummond geometry calculations
+  - `record_calculation(calculation_type: str, symbol: str, timeframe: str, execution_time_ms: float, success: bool, cache_hit: bool) -> None`
+  - `get_summary() -> dict[str, Any]`: Aggregate statistics
+  - `get_slow_calculations(limit: int) -> List[CalculationMetrics]`: Find slowest operations
+  - `reset() -> None`: Clear metrics
+- `get_calculation_profiler() -> CalculationProfiler`: Global singleton
+- Goal: Calculation performance profiling and optimization
 
-**dgas/backtesting/runner.py**
-- `BacktestRequest` dataclass encapsulating CLI options (symbols, interval, strategy, simulation config, persistence switches)
-- `BacktestRunner.run(request) -> list[BacktestRunResult]`: Load datasets, instantiate strategy, run engine, compute metrics, optionally persist results
-- Goal: High-level orchestration reused by CLI, tests, and notebooks
+**dgas/calculations/optimized_coordinator.py**
+- `OptimizedTimeframeData`: TimeframeData with pre-computed indexes for fast lookups
+  - `get_state_at_timestamp(timestamp: datetime) -> StateSeries | None`: Binary search lookup
+  - `get_pldot_at_timestamp(timestamp: datetime) -> PLDotSeries | None`: Binary search lookup
+  - `get_envelope_at_timestamp(timestamp: datetime) -> EnvelopeSeries | None`: Binary search lookup
+  - `get_recent_envelopes(timestamp: datetime, count: int) -> List[EnvelopeSeries]`: Binary search
+- `OptimizedMultiTimeframeCoordinator`: Performance-optimized coordinator
+  - Extends `MultiTimeframeCoordinator` with caching, binary search, memoization
+  - `analyze(...) -> MultiTimeframeAnalysis`: Optimized analysis with profiling
+  - `clear_cache() -> None`: Clear analysis cache
+  - `_detect_confluence_zones(...) -> List[ConfluenceZone]`: Optimized clustering (O(n log n) vs O(n²))
+- Goal: Performance-optimized multi-timeframe coordination (<200ms target)
 
-**dgas/backtesting/metrics.py**
-- `calculate_performance(result, risk_free_rate=Decimal("0")) -> PerformanceSummary`: Compute total/annualized return, volatility, Sharpe, Sortino, max drawdown, trade stats, profit factor, net profit
-- Goal: Centralised performance analytics feeding reports and persistence
-
-**dgas/backtesting/persistence.py**
-- `persist_backtest(result, performance, metadata=None, conn=None) -> int`: Store backtest summary and trade ledger in PostgreSQL (`backtest_results`, `backtest_trades`), capturing runtime configuration in JSONB
-- Goal: Durable storage of simulation outcomes for later inspection or dashboards
-
-**dgas/backtesting/reporting.py**
-- `build_summary_table(run_results) -> rich.table.Table`: Console-ready summary view
-- `export_markdown(run, path)`, `export_json(run, path)`: Generate shareable artifacts per symbol
-- Goal: Reporting helpers shared by CLI and future UIs
+**dgas/calculations/benchmarks.py**
+- Benchmarking utilities for calculation performance
+- Goal: Performance benchmarking and validation
 
 ---
 
-### CLI & Monitoring
+### Backtesting Engine
+**dgas/backtesting/entities.py**
+- `SimulationConfig`, `Signal`, `Position`, `Trade`, `PortfolioSnapshot`, `BacktestResult`: Immutable dataclasses
+- Goal: Common data structures for engine, metrics, persistence, reporting
+
+**dgas/backtesting/data_loader.py**
+- `load_ohlcv(symbol, interval, *, start=None, end=None, limit=None, conn=None) -> list[IntervalData]`: Fetch chronological OHLCV bars
+- `load_dataset(symbol, interval, *, start=None, end=None, include_indicators=True, limit=None, conn=None) -> BacktestDataset`: Bundle bars plus optional indicator snapshots
+- Goal: Provide deterministic, ready-to-simulate datasets
+
+**dgas/backtesting/engine.py**
+- `SimulationEngine(SimulationConfig | None)`: Deterministic execution core
+  - Handles order sizing, commission/slippage, position management, equity curve tracking, forced liquidation
+- `run(dataset: BacktestDataset, strategy: BaseStrategy) -> BacktestResult`: Execute strategy signals bar-by-bar
+- Goal: Reusable simulation kernel for all strategies
+
+**dgas/backtesting/strategies/base.py**
+- `StrategyConfig` (pydantic), `StrategyContext`, `BaseStrategy`, `rolling_history()` helper deque
+- Goal: Pluggable strategy framework
+
+**dgas/backtesting/strategies/multi_timeframe.py**
+- `MultiTimeframeStrategy` and config: Simple momentum-style placeholder matching CLI default
+- Goal: Multi-timeframe strategy implementation
+
+**dgas/backtesting/strategies/registry.py**
+- `STRATEGY_REGISTRY`: Mapping names to classes
+- `instantiate_strategy(name: str, params: dict) -> BaseStrategy`: Build configured strategies from CLI overrides
+- Goal: Registry-based strategy discovery
+
+**dgas/backtesting/runner.py**
+- `BacktestRequest`: Dataclass encapsulating CLI options
+- `BacktestRunner.run(request: BacktestRequest) -> list[BacktestRunResult]`: Load datasets, instantiate strategy, run engine, compute metrics, optionally persist
+- Goal: High-level orchestration reused by CLI, tests, notebooks
+
+**dgas/backtesting/metrics.py**
+- `calculate_performance(result: BacktestResult, risk_free_rate: Decimal) -> PerformanceSummary`: Compute total/annualized return, volatility, Sharpe, Sortino, max drawdown, trade stats, profit factor, net profit
+- Goal: Centralized performance analytics
+
+**dgas/backtesting/persistence.py**
+- `persist_backtest(result: BacktestResult, performance: PerformanceSummary, metadata: dict | None, conn: Connection | None) -> int`: Store backtest summary and trade ledger in PostgreSQL
+- Goal: Durable storage of simulation outcomes
+
+**dgas/backtesting/reporting.py**
+- `build_summary_table(run_results: List[BacktestRunResult]) -> rich.table.Table`: Console-ready summary view
+- `export_markdown(run: BacktestRunResult, path: Path) -> None`, `export_json(run: BacktestRunResult, path: Path) -> None`: Generate shareable artifacts
+- Goal: Reporting helpers shared by CLI and UIs
+
+---
+
+### Prediction System
+**dgas/prediction/persistence.py**
+- `PredictionPersistence(settings: Settings | None)`: Database persistence for prediction system
+  - `save_prediction_run(...) -> int`: Save prediction cycle metadata with timing breakdown
+  - `get_recent_runs(limit: int, status: str | None) -> List[dict]`: Retrieve recent prediction runs
+  - `save_generated_signals(run_id: int, signals: Sequence[GeneratedSignal]) -> int`: Bulk save trading signals
+  - `get_recent_signals(symbol: str | None, lookback_hours: int, min_confidence: float | None, limit: int) -> List[dict]`: Query signals with filters
+  - `update_signal_outcome(signal_id: int, outcome: str, actual_high: Decimal, actual_low: Decimal, actual_close: Decimal, pnl_pct: float) -> None`: Update signal with actual price data
+  - `save_metric(metric_type: str, metric_value: float, aggregation_period: str | None, metadata: dict | None) -> int`: Save performance/calibration metric
+  - `get_metrics(metric_type: str | None, lookback_hours: int, aggregation_period: str | None, limit: int) -> List[dict]`: Query metrics for analysis
+  - `update_scheduler_state(status: str, last_run_timestamp: datetime | None, next_scheduled_run: datetime | None, current_run_id: int | None, error_message: str | None) -> None`: Update singleton scheduler state
+  - `get_scheduler_state() -> dict | None`: Retrieve current scheduler status
+- Goal: CRUD operations for prediction runs, signals, metrics, scheduler state
+
+**dgas/prediction/engine.py**
+- `SignalType(Enum)`: LONG, SHORT, EXIT_LONG, EXIT_SHORT
+- `GeneratedSignal`: Complete trading signal with context (symbol, signal_timestamp, signal_type, entry_price, stop_loss, target_price, confidence, signal_strength, timeframe_alignment, risk_reward_ratio, htf_trend, trading_tf_state, confluence_zones_count, pattern_context, notification tracking, outcome tracking)
+- `SignalGenerator(coordinator, min_alignment_score, min_signal_strength, stop_loss_atr_multiplier, target_rr_ratio)`: Signal generation from multi-timeframe analysis
+  - `generate_signals(symbol: str, htf_data: TimeframeData, trading_tf_data: TimeframeData, ltf_data: TimeframeData | None) -> List[GeneratedSignal]`: Create actionable signals
+  - `_apply_entry_rules(analysis: MultiTimeframeAnalysis) -> SignalType | None`: Determine signal type
+  - `_calculate_levels(signal_type: SignalType, analysis: MultiTimeframeAnalysis, trading_tf_data: TimeframeData) -> tuple[Decimal, Decimal, Decimal]`: Calculate entry/stop/target
+  - `_calculate_confidence(analysis: MultiTimeframeAnalysis) -> float`: Weighted score
+- `SignalAggregator(dedup_time_window_minutes: int, min_confidence: float, min_alignment: float)`: De-duplication and ranking
+  - `aggregate_signals(signals: List[GeneratedSignal], min_confidence: float, min_alignment: float, enabled_patterns: set[str], max_signals: int) -> List[GeneratedSignal]`: Filter, rank, deduplicate
+  - `_detect_duplicates(signals: List[GeneratedSignal]) -> List[GeneratedSignal]`: Remove duplicates within time window
+  - `_rank_signals(signals: List[GeneratedSignal]) -> List[GeneratedSignal]`: Rank by composite score
+- `PredictionRunResult`: Execution metrics from prediction cycle
+- `PredictionEngine(settings, persistence, signal_generator, lookback_bars: int)`: Prediction pipeline orchestration
+  - `execute_prediction_cycle(symbols: List[str], interval: str, timeframes: dict, htf_interval: str, trading_interval: str, persist_results: bool) -> PredictionRunResult`: Full cycle
+  - `_refresh_market_data(symbols: List[str], interval: str, errors: List[str]) -> None`: Incremental updates
+  - `_load_market_data(symbol: str, interval: str) -> List[IntervalData]`: Load recent bars
+  - `_calculate_timeframe_data(intervals: List[IntervalData], timeframe: str, classification: TimeframeType) -> TimeframeData`: Recompute indicators
+- Goal: Transform multi-timeframe analysis into actionable trading signals
+
+**dgas/prediction/scheduler.py**
+- `TradingSession`: Trading session configuration (market_open, market_close, timezone, trading_days)
+- `SchedulerConfig`: Scheduler configuration (interval, exchange_code, catch_up_on_start, daemon_mode)
+- `MarketHoursManager(exchange_code: str, session: TradingSession, calendar: ExchangeCalendar)`: Trading hours awareness
+  - `is_market_open(dt: datetime) -> bool`: Check if market is currently open
+  - `next_market_open(from_dt: datetime) -> datetime`: Calculate next market open time
+  - `next_market_close(from_dt: datetime) -> datetime`: Calculate next market close time (handles half-days)
+  - `is_trading_day(dt: datetime) -> bool`: Check if given datetime is trading day
+- `PredictionScheduler(config: SchedulerConfig, engine: PredictionEngine, persistence: PredictionPersistence, market_hours: MarketHoursManager)`: APScheduler-based prediction orchestration
+  - `start() -> None`: Start scheduler with APScheduler, run catch-up if enabled
+  - `stop(wait: bool) -> None`: Graceful shutdown with signal handling
+  - `run_once() -> PredictionRunResult`: Execute single prediction cycle manually
+  - `_run_catch_up() -> None`: Run comprehensive cycle from market open to now if started late
+  - `_execute_if_market_open() -> None`: Execute cycle only if market is open (scheduled job)
+- Goal: Automated prediction execution during market hours with recovery and graceful shutdown
+
+**dgas/prediction/notifications/router.py**
+- `NotificationConfig`: Configuration for notification delivery (enabled_channels, discord_bot_token, discord_channel_id, discord_min_confidence, console_max_signals, console_format)
+  - `from_env() -> NotificationConfig`: Create config from environment variables
+- `NotificationAdapter(ABC)`: Abstract base for notification channel implementations
+  - `send(signals: List[GeneratedSignal], metadata: dict) -> bool`: Send notifications
+  - `format_message(signals: List[GeneratedSignal]) -> str`: Format signals for channel
+  - `should_notify(signal: GeneratedSignal, min_confidence: float) -> bool`: Check if signal meets threshold
+- `NotificationRouter(config: NotificationConfig, adapters: dict[str, NotificationAdapter])`: Routes signals to configured channels
+  - `send_notifications(signals: List[GeneratedSignal], run_metadata: dict) -> None`: Send notifications through all enabled channels
+  - `_filter_signals_for_channel(signals: List[GeneratedSignal], channel: str) -> List[GeneratedSignal]`: Filter signals based on channel-specific thresholds
+- Goal: Multi-channel notification delivery with proper error handling
+
+**dgas/prediction/notifications/adapters/discord.py**
+- `DiscordAdapter(bot_token: str, channel_id: str, rate_limit_delay: float, timeout: int)`: Discord Bot API integration
+  - `send(signals: List[GeneratedSignal], metadata: dict) -> bool`: Send signals as individual Discord embeds
+  - `_create_embed(signal: GeneratedSignal, metadata: dict) -> dict`: Create Discord embed object (Green for LONG, Red for SHORT)
+  - `_format_confidence_bar(confidence: float) -> str`: Visual confidence bar using Unicode blocks
+  - `_send_to_discord(embeds: List[dict]) -> bool`: Send embeds via Discord API with rate limiting and retry logic
+- Goal: Discord bot integration with rich embeds and rate limiting
+
+**dgas/prediction/notifications/adapters/console.py**
+- `ConsoleAdapter(max_signals: int, output_format: str)`: Rich console table output
+  - `send(signals: List[GeneratedSignal], metadata: dict) -> bool`: Display signals in formatted Rich table
+  - `_display_summary_table(signals: List[GeneratedSignal], metadata: dict) -> None`: Compact summary table
+  - `_display_detailed_table(signals: List[GeneratedSignal], metadata: dict) -> None`: Detailed panel view per signal
+- Goal: Console output with rich formatting (summary/detailed formats)
+
+**dgas/prediction/monitoring/performance.py**
+- `LatencyMetrics(data_fetch_ms: int, indicator_calc_ms: int, signal_generation_ms: int, notification_ms: int, total_ms: int)`: Latency measurements
+- `ThroughputMetrics(symbols_processed: int, signals_generated: int, execution_time_ms: int, symbols_per_second: float)`: Throughput measurements
+  - `calculate(symbols_processed: int, signals_generated: int, execution_time_ms: int) -> ThroughputMetrics`: Calculate from raw counts
+- `PerformanceTracker(persistence: PredictionPersistence)`: System performance monitoring
+  - `track_cycle(run_id: int, latency: LatencyMetrics, throughput: ThroughputMetrics, errors: List[str]) -> None`: Record cycle metrics
+  - `get_performance_summary(lookback_hours: int) -> dict[str, Any]`: Aggregate statistics
+  - `check_sla_compliance() -> dict[str, bool]`: Verify SLA targets
+- Goal: Track system performance and validate SLA compliance
+
+**dgas/prediction/monitoring/calibration.py**
+- `CalibrationEngine(persistence: PredictionPersistence, evaluation_window_hours: int)`: Signal accuracy validation
+  - `evaluate_signal(signal: GeneratedSignal, actual_prices: dict) -> dict`: Compare signal to actual outcome
+  - `batch_evaluate(lookback_hours: int) -> dict[str, Any]`: Evaluate all pending signals
+  - `get_calibration_report(date_range: tuple[datetime, datetime]) -> dict[str, Any]`: Win rate by confidence bucket
+- Goal: Validate prediction accuracy and calibration
+
+---
+
+### CLI Commands
 **dgas/cli/analyze.py**
-- `load_market_data(symbol: str, interval: str, lookback_bars: int = 200) -> list[IntervalData]`: Load from DB
+- `load_market_data(symbol: str, interval: str, lookback_bars: int) -> list[IntervalData]`: Load from DB
 - `calculate_indicators(intervals: list[IntervalData]) -> TimeframeData`: Calculate all indicators for single TF
 - `display_single_timeframe_analysis(symbol: str, interval: str, tf_data: TimeframeData) -> None`: Rich console output
 - `display_multi_timeframe_analysis(symbol: str, analysis: MultiTimeframeAnalysis) -> None`: Rich console output
 - `run_analyze_command(symbols: list[str], htf_interval: str, trading_interval: str, lookback_bars: int, save_to_db: bool, output_format: str) -> int`: Full analysis workflow
-- Goal: Interactive CLI for Drummond Geometry analysis with Rich formatting
+- Goal: Interactive CLI for Drummond Geometry analysis
 
 **dgas/cli/backtest.py**
-- `run_backtest_command(...) -> int`: Parse CLI arguments (strategy, capital, risk parameters, report destinations), invoke `BacktestRunner`, render Rich summary/detailed output, and emit optional Markdown/JSON artifacts
+- `run_backtest_command(...) -> int`: Parse CLI arguments, invoke BacktestRunner, render Rich summary/detailed output, emit optional Markdown/JSON artifacts
 - Helpers: `_parse_datetime`, `_resolve_output_path`, `_format_percent/_format_number`
-- Goal: User-facing entry to the Phase 3 backtesting workflow
+- Goal: User-facing entry to backtesting workflow
 
-**dgas/monitoring/report.py**
-- `SymbolIngestionStats(symbol, exchange, interval, bar_count, first_timestamp, last_timestamp, estimated_missing_bars)`
-  - `to_row() -> Sequence[str]`
-- `generate_ingestion_report(interval: str = "30min") -> List[SymbolIngestionStats]`: Query DB for coverage
-- `render_markdown_report(stats: Iterable[SymbolIngestionStats]) -> str`: Format as GFM table
-- `write_report(stats: Iterable[SymbolIngestionStats], output_path: Path) -> None`
-- Helper: `_interval_to_seconds(interval: str) -> int`
-- Goal: Generate completeness reports for ingested market data
+**dgas/cli/configure.py**
+- `setup_configure_parser(subparsers) -> ArgumentParser`: Set up configure subcommand
+- `_init_command(args: Namespace) -> int`: Interactive configuration wizard
+- `_show_command(args: Namespace) -> int`: Display current configuration
+- `_validate_command(args: Namespace) -> int`: Validate configuration file
+- `_edit_command(args: Namespace) -> int`: Edit configuration file
+- Goal: Configuration file management and interactive setup
+
+**dgas/cli/data.py**
+- `setup_data_parser(subparsers) -> ArgumentParser`: Set up data subcommand
+- Data management commands: backfill, update, report, quality
+- Goal: Data ingestion and quality management
+
+**dgas/cli/predict.py**
+- `setup_predict_parser(subparsers) -> ArgumentParser`: Set up predict subcommand
+- `run_predict_command(args: Namespace) -> int`: Generate trading signals with flexible output formats
+- Goal: Manual signal generation with notifications
+
+**dgas/cli/report.py**
+- `setup_report_parser(subparsers) -> ArgumentParser`: Set up report subcommand
+- Report generation: performance, signals, backtests, system
+- Goal: Comprehensive report generation
+
+**dgas/cli/scheduler_cli.py**
+- `setup_scheduler_parser(subparsers) -> ArgumentParser`: Set up scheduler subcommand
+- Scheduler management: start, stop, status, run-once
+- Goal: Prediction scheduler management
+
+**dgas/cli/status_cli.py**
+- `setup_status_parser(subparsers) -> ArgumentParser`: Set up status subcommand
+- System health monitoring: database, API, scheduler, predictions
+- Goal: System health and status monitoring
+
+**dgas/cli/monitor.py**
+- `setup_monitor_parser(subparsers) -> ArgumentParser`: Set up monitor subcommand
+- Performance monitoring: latency, throughput, errors, SLA compliance
+- Goal: Real-time performance tracking
 
 ---
 
+### Dashboard System
+**dgas/dashboard/__main__.py**
+- `build_parser() -> ArgumentParser`: Dashboard CLI argument parser
+- `main(argv: list[str] | None) -> int`: Start Streamlit dashboard server
+- Goal: Dashboard CLI entry point
+
+**dgas/dashboard/app.py**
+- `configure_page() -> None`: Configure Streamlit page settings
+- `render_sidebar() -> str`: Render sidebar navigation and return selected page
+- `render_page(page: str) -> None`: Render selected page
+- `main() -> NoReturn`: Main application entry point
+- Goal: Main Streamlit dashboard application with navigation
+
+**dgas/dashboard/pages/01_Overview.py**
+- `Overview.render() -> None`: Overview page with system metrics and recent activity
+- Goal: Dashboard overview page
+
+**dgas/dashboard/pages/02_Data.py**
+- `Data.render() -> None`: Data ingestion and quality page
+- Goal: Data management visualization
+
+**dgas/dashboard/pages/03_Predictions.py**
+- `Predictions.render() -> None`: Predictions and signals page
+- Goal: Signal visualization and filtering
+
+**dgas/dashboard/pages/04_Backtests.py**
+- `Backtests.render() -> None`: Backtest results page
+- Goal: Backtest visualization and analysis
+
+**dgas/dashboard/pages/05_System_Status.py**
+- `SystemStatus.render() -> None`: System status and health page
+- Goal: System monitoring dashboard
+
+**dgas/dashboard/pages/06_Custom_Dashboard.py**
+- `CustomDashboard.render() -> None`: Custom dashboard builder page
+- Goal: User-configurable dashboard with widgets
+
+**dgas/dashboard/components/database.py**
+- Database query components and utilities
+- Goal: Database interaction components
+
+**dgas/dashboard/components/charts.py**
+- Chart components for visualization
+- Goal: Reusable chart components
+
+**dgas/dashboard/components/notifications.py**
+- Notification components and UI
+- Goal: Notification management UI
+
+**dgas/dashboard/components/utils.py**
+- `load_dashboard_config() -> DGASConfig`: Load dashboard configuration
+- Utility functions for dashboard components
+- Goal: Shared dashboard utilities
+
+**dgas/dashboard/widgets/base.py**
+- Base widget class for custom dashboard widgets
+- Goal: Widget framework foundation
+
+**dgas/dashboard/widgets/metric.py**
+- Metric widget implementation
+- Goal: Metric display widget
+
+**dgas/dashboard/widgets/chart.py**
+- Chart widget implementation
+- Goal: Chart display widget
+
+**dgas/dashboard/widgets/table.py**
+- Table widget implementation
+- Goal: Table display widget
+
+**dgas/dashboard/layout/manager.py**
+- Layout management for custom dashboards
+- Goal: Dashboard layout persistence and management
+
+**dgas/dashboard/filters/preset_manager.py**
+- Filter preset management
+- Goal: Save and reuse filter configurations
+
+**dgas/dashboard/filters/preset_ui.py**
+- Filter preset UI components
+- Goal: Filter preset user interface
+
+**dgas/dashboard/export/enhanced_exporter.py**
+- Multi-format export (CSV, Excel, JSON, PDF)
+- Goal: Report export functionality
+
+**dgas/dashboard/services/notification_service.py**
+- Notification service integration
+- Goal: Dashboard notification integration
+
+**dgas/dashboard/realtime_client.py**
+- `get_client() -> RealtimeClient`: Get real-time client instance
+- `setup_realtime_client() -> None`: Initialize real-time client
+- `render_websocket_status() -> None`: Display WebSocket connection status
+- `check_for_updates() -> None`: Polling fallback for updates
+- Goal: Real-time data updates via WebSocket
+
+**dgas/dashboard/websocket_server.py**
+- WebSocket server for real-time updates
+- Goal: Real-time data streaming to dashboard
+
+**dgas/dashboard/performance/optimizer.py**
+- Dashboard performance optimization
+- Goal: Dashboard performance tuning
+
+**dgas/dashboard/utils/alert_rules.py**
+- Alert rule management
+- Goal: Customizable alert rules
+
+---
+
+### Monitoring
+**dgas/monitoring/report.py**
+- `SymbolIngestionStats`: Symbol ingestion statistics
+- `generate_ingestion_report(interval: str) -> List[SymbolIngestionStats]`: Query DB for coverage
+- `render_markdown_report(stats: Iterable[SymbolIngestionStats]) -> str`: Format as GFM table
+- `write_report(stats: Iterable[SymbolIngestionStats], output_path: Path) -> None`
+- Goal: Generate completeness reports for ingested market data
+
+---
 
 ## File Connection Map (ASCII)
 
@@ -260,41 +663,81 @@ Stack: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI formatting).
 │  dgas/__main__.py                                                           │
 │      ├─ analyze      → cli/analyze.py → calculations/, data/                │
 │      ├─ backtest     → cli/backtest.py → backtesting/ (runner, engine)      │
+│      ├─ configure    → cli/configure.py → config/ (loader, schema)        │
+│      ├─ data         → cli/data.py → data/ (ingestion, repository)          │
+│      ├─ predict      → cli/predict.py → prediction/ (engine, scheduler)    │
+│      ├─ report       → cli/report.py → monitoring/, prediction/             │
+│      ├─ scheduler    → cli/scheduler_cli.py → prediction/scheduler.py       │
+│      ├─ status       → cli/status_cli.py → db/, prediction/                 │
+│      ├─ monitor      → cli/monitor.py → prediction/monitoring/              │
 │      └─ data-report  → monitoring/report.py                                 │
 └──────────────────────┬────────────────────────────────────────────────────────┘
                        │
                        ↓
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        Configuration Layer (settings.py)                    │
-│  get_settings() → Settings (Pydantic, .env)                                 │
+│                        Configuration Layer                                   │
+│  config/loader.py → config/schema.py → config/adapter.py                    │
+│  settings.py (legacy)                                                        │
 └──────────────────────┬────────────────────────────────────────────────────────┘
                        │
-        ┌──────────────┴──────────────┬──────────────────┬─────────────────────┐
+        ┌───────────────┴──────────────┬──────────────────┬─────────────────────┐
         ↓                              ↓                  ↓                     ↓
 ┌───────────────┐   ┌────────────────────┐   ┌────────────────┐   ┌────────────────────┐
 │  Database     │   │ Data Ingestion     │   │ Calculations    │   │ Backtesting         │
-│  db/, migrations │ │ data/ client, repo│   │ calculations/   │   │ backtesting/ runner,│
-│  DrummondPersistence │ quality, ingestion│ │ PLdot/States/    │   │ engine, metrics,     │
-│  get_connection() │ │ fetch_market_data │   │ Patterns/MTF    │   │ persistence/reporting │
+│  db/          │   │ data/              │   │ calculations/   │   │ backtesting/       │
+│  - connection_pool.py                                                  │   │ - client, repo    │   │ - PLdot/States/    │   │ - runner, engine,  │
+│  - enhanced_persistence.py                                              │   │ - quality,         │   │   Patterns/MTF    │   │   metrics,         │
+│  - query_cache.py                                                       │   │   ingestion       │   │ - cache/profiler  │   │   persistence/     │
+│  - performance_monitor.py                                               │   │ - exchange_calendar│   │ - optimized_*      │   │   reporting        │
+│  - persistence.py                                                      │   │                   │   │ - timeframe_builder│   │ - strategies/      │
+│  - migrations.py                                                        │   │                   │   │                   │   │   (base, registry) │
 └──────┬────────┘   └─────────┬──────────┘   └────────┬───────┘   └────────┬──────────┘
        │                      │                      │                    │
        ↓                      ↓                      ↓                    ↓
 PostgreSQL ← bulk_upsert_market_data()   Indicator outputs → strategies   persist_backtest()
-Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis, backtest_results/trades
-```
+Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis, 
+        prediction_runs, generated_signals, prediction_metrics, scheduler_state,
+        backtest_results, backtest_trades, exchanges, market_holidays, trading_days
 
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Prediction System                                     │
+│  prediction/                                                                 │
+│  - engine.py → SignalGenerator, SignalAggregator, PredictionEngine         │
+│  - scheduler.py → PredictionScheduler, MarketHoursManager                   │
+│  - persistence.py → PredictionPersistence                                   │
+│  - notifications/router.py → NotificationRouter                              │
+│  - notifications/adapters/ → DiscordAdapter, ConsoleAdapter                │
+│  - monitoring/ → PerformanceTracker, CalibrationEngine                      │
+└──────────────────────┬────────────────────────────────────────────────────────┘
+                       │
+                       ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Dashboard System                                      │
+│  dashboard/                                                                  │
+│  - app.py → Main Streamlit application                                      │
+│  - pages/ → Overview, Data, Predictions, Backtests, SystemStatus, Custom    │
+│  - components/ → Database, Charts, Notifications, Utils                     │
+│  - widgets/ → Metric, Chart, Table widgets                                   │
+│  - layout/manager.py → Layout persistence                                   │
+│  - filters/ → Preset management                                             │
+│  - export/ → Multi-format export                                            │
+│  - realtime_client.py → WebSocket client                                     │
+│  - websocket_server.py → WebSocket server                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-
 ## Data Flow Summary
 
-1. **Configuration**: `settings.py` loads `.env` → cached `Settings` instance
-2. **CLI Routing**: `__main__.py` dispatches to `analyze`, `backtest`, or `data-report`
-3. **Ingestion**: `data/` modules fetch EODHD data, validate quality, and persist via `bulk_upsert_market_data()`
-4. **Calculations**: Phase 2 calculators produce PLdot, envelopes, states, patterns, and multi-timeframe alignment
-5. **Backtesting**: `backtesting/runner.py` loads historical bars, runs strategies through the engine, computes metrics, optionally persists to `backtest_results` / `backtest_trades`, and exports reports
-6. **Monitoring**: `monitoring/report.py` generates ingestion coverage summaries and Markdown output
+1. **Configuration**: `config/loader.py` loads YAML/JSON → `config/adapter.py` merges with env vars → `UnifiedSettings` provides unified interface
+2. **CLI Routing**: `__main__.py` dispatches to subcommands (analyze, backtest, configure, data, predict, report, scheduler, status, monitor)
+3. **Ingestion**: `data/` modules fetch EODHD data, validate quality, persist via `bulk_upsert_market_data()`
+4. **Calculations**: `calculations/` modules produce PLdot, envelopes, states, patterns, multi-timeframe alignment (with caching and profiling)
+5. **Backtesting**: `backtesting/runner.py` loads historical bars, runs strategies through engine, computes metrics, optionally persists, exports reports
+6. **Prediction**: `prediction/engine.py` orchestrates signal generation → `prediction/scheduler.py` schedules execution → `prediction/notifications/` delivers alerts
+7. **Dashboard**: `dashboard/app.py` serves Streamlit UI → `dashboard/realtime_client.py` connects to WebSocket → pages render data from persistence layer
+8. **Monitoring**: `monitoring/report.py` generates ingestion coverage summaries; `prediction/monitoring/` tracks performance and calibration
 
 ---
 
@@ -302,21 +745,25 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 
 ### Type Safety
 - All functions use type hints (enforced by mypy --disallow-untyped-defs)
-- Pydantic models for validation (Settings, IntervalData)
+- Pydantic models for validation (Settings, DGASConfig, IntervalData)
 - Decimal for prices (avoid float rounding), datetime with timezone.utc
 - Frozen dataclasses for immutable calculation results (PLDotSeries, EnvelopeSeries, StateSeries, etc.)
 
 ### Error Handling
 - Custom exceptions (EODHDError hierarchy) for external API failures
-- Context managers for resources (get_connection, _client_context, DrummondPersistence)
+- Context managers for resources (get_connection, get_db_connection, _client_context, DrummondPersistence)
 - Transactional DB operations (commit on success, rollback on exception)
 
 ### Code Organization (DRY)
 - Single Settings instance via @lru_cache
+- UnifiedSettings adapter bridges new config system and legacy Settings
 - Reusable repository functions (ensure_market_symbol, bulk_upsert_market_data)
 - Generic timestamp coercion (_coerce_time_param, _coerce_date_param)
 - Shared quality analysis (analyze_intervals, summarize_reports)
 - Factory methods for data models (IntervalData.from_api_record, IntervalData.from_api_list)
+- Calculation caching (CalculationCache, CacheInvalidationManager)
+- Query result caching (QueryCache, CacheManager)
+- Connection pooling (PooledConnectionManager)
 
 ### Naming
 - snake_case for functions, variables, modules
@@ -325,14 +772,15 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 - Descriptive names: bulk_upsert_market_data, not save_data; MultiTimeframeCoordinator, not MTF
 
 ### Dependencies
-- Production: numpy, pandas, pydantic, pydantic-settings, python-dotenv, requests, sqlalchemy, psycopg[binary], structlog, rich
+- Production: numpy, pandas, pydantic, pydantic-settings, python-dotenv, requests, sqlalchemy, psycopg[binary], structlog, rich, apscheduler, pyyaml
+- Dashboard: streamlit, plotly
 - Dev: pytest, ruff (linter/formatter), mypy (type checker)
 - Line length: 100 chars (ruff config)
 
 ### Testing
 - pytest with pythonpath = ["src"], testpaths = ["tests"]
 - mypy excludes tests/ directory
-- Coverage: calculations/, data/, monitoring/ have tests
+- Coverage: calculations/, data/, monitoring/, prediction/, backtesting/ have tests
 
 ---
 
@@ -341,21 +789,20 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 ### Core Tables
 - **market_symbols**: symbol (unique), exchange, metadata (sector, industry, market_cap)
 - **market_data**: OHLCV bars with interval_type, unique on (symbol_id, timestamp, interval_type)
-  * Constraints: positive prices, OHLC relationships (high ? open/close, low ? open/close)
+  * Constraints: positive prices, OHLC relationships (high >= open/close, low <= open/close)
 - **market_states_v2**: Enhanced state classification with confidence, trend direction, PLdot slope, bars_in_state
 - **pattern_events**: Detected patterns (PLDOT_PUSH, EXHAUST, C_WAVE, etc.) with direction, strength, timestamps
 - **multi_timeframe_analysis**: HTF/trading TF alignment, signal strength, recommended action, confluence zones count
 - **confluence_zones**: Support/resistance zones confirmed by multiple timeframes (strength >= 2)
-- **pldot_calculations**: PLdot values with slopes, momentum (legacy, may be replaced by calculations/)
-- **envelope_bands**: Upper/lower/middle bands, width, position (legacy, may be replaced by calculations/)
-- **drummond_lines**: Support/resistance with timestamps, slopes, strength (legacy)
-- **trading_signals**: Entry/stop/target prices, risk-reward (Phase 3)
-- **backtest_results**: Strategy metrics (Sharpe, max drawdown, win rate, etc.) (Phase 3)
-- **backtest_trades**: Individual trades per backtest with P&L (Phase 3)
-- **prediction_runs**: Metadata for scheduled prediction cycles with timing breakdown (Phase 4)
-- **generated_signals**: Trading signals with confidence scores, context, and outcomes (Phase 4)
-- **prediction_metrics**: Time-series performance and calibration metrics (Phase 4)
-- **scheduler_state**: Singleton table for scheduler status and recovery (Phase 4)
+- **prediction_runs**: Prediction cycle metadata with timing breakdown (data_fetch_ms, indicator_calc_ms, signal_generation_ms, notification_ms)
+- **generated_signals**: Trading signals with confidence scores, context, outcomes, notification tracking
+- **prediction_metrics**: Time-series performance and calibration metrics
+- **scheduler_state**: Singleton table for scheduler status and recovery
+- **exchanges**: Exchange metadata (timezone, market_open/close times, country, currency, sync tracking)
+- **market_holidays**: Holiday and half-day schedules with early_close_time support
+- **trading_days**: Pre-computed trading calendar with actual_close times for half-days
+- **backtest_results**: Strategy metrics (Sharpe, max drawdown, win rate, etc.)
+- **backtest_trades**: Individual trades per backtest with P&L
 
 ### Indexing Strategy
 - DESC indexes on (symbol_id, timestamp) for recent data queries
@@ -367,46 +814,35 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 
 ## Current Implementation Status
 
-### Completed (Phase 1 & 2)
-? Database schema and migrations (001 + 002)
-? Settings and configuration
-? EODHD API client with rate limiting
-? Data models (IntervalData) with validation
-? Repository layer (upsert, latest timestamp queries)
-? Ingestion workflows (backfill, incremental updates)
-? Quality analysis (gaps, duplicates, chronology)
-? CLI skeleton with analyze and data-report commands
-? Monitoring reports (Markdown output)
-? PLdot calculations (3-bar MA with projection)
-? Envelope bands (PLdot range method - Drummond's preferred)
-? Drummond lines and zones (two-bar logic)
-? Market state classification (5-state model with confidence)
-? Pattern detection (PLdot push/refresh, exhaust, C-wave, congestion oscillation)
-? Multi-timeframe coordination (HTF trend filter, PLdot overlay, confluence zones, alignment scoring)
-? Database persistence (DrummondPersistence for states, patterns, multi-timeframe analysis)
-
-### Completed (Phase 3)
+### Completed
+✓ Database schema and migrations (001-004)
+✓ Settings and configuration (legacy + new config system)
+✓ EODHD API client with rate limiting
+✓ Data models (IntervalData) with validation
+✓ Repository layer (upsert, latest timestamp queries)
+✓ Ingestion workflows (backfill, incremental updates)
+✓ Quality analysis (gaps, duplicates, chronology)
+✓ Exchange calendar system with EODHD integration
+✓ PLdot calculations (3-bar MA with projection)
+✓ Envelope bands (PLdot range method - Drummond's preferred)
+✓ Drummond lines and zones (two-bar logic)
+✓ Market state classification (5-state model with confidence)
+✓ Pattern detection (PLdot push/refresh, exhaust, C-wave, congestion oscillation)
+✓ Multi-timeframe coordination (HTF trend filter, PLdot overlay, confluence zones, alignment scoring)
+✓ Database persistence (DrummondPersistence, PredictionPersistence)
 ✓ Backtesting engine with deterministic simulation
 ✓ Strategy framework with multi-timeframe strategy
 ✓ Performance metrics (Sharpe, Sortino, max drawdown, win rate)
-✓ CLI backtest command with reporting
-✓ Walk-forward analysis support
+✓ CLI commands (analyze, backtest, configure, data, predict, report, scheduler, status, monitor)
+✓ Prediction system (engine, scheduler, notifications, monitoring, calibration)
+✓ Dashboard system (Streamlit UI with 6 pages, real-time updates, custom widgets, export)
+✓ Performance optimizations (connection pooling, query caching, calculation caching, profiling)
+✓ Configuration system (YAML/JSON config files with env var expansion)
 
-### In Progress (Phase 4 - Week 4 Notification System)
-✓ Prediction system database schema (migration 003) - COMPLETED (Week 1)
-✓ Prediction persistence layer (PredictionPersistence) - COMPLETED (Week 1)
-✓ Signal generation engine (SignalGenerator, PredictionEngine, SignalAggregator) - COMPLETED (Week 2)
-✓ Exchange calendar system with EODHD integration (migration 004) - COMPLETED (Week 3)
-✓ Market hours management with database-backed calendar - COMPLETED (Week 3)
-✓ APScheduler-based prediction scheduling with catch-up logic - COMPLETED (Week 3)
-✓ Multi-channel notification system (Discord + Console) - COMPLETED (Week 4)
-? Performance monitoring and calibration - PENDING (Week 5)
-
-### Pending (Phase 5+)
+### In Progress / Future
 ? ML-enhanced confidence scoring
 ? Adaptive threshold tuning based on calibration
-? Real-time streaming updates (WebSocket)
-? Web dashboard for visualization
+? Real-time streaming updates (WebSocket fully implemented, may need enhancements)
 ? Advanced PLdot variants (volume-weighted, momentum)
 ? Portfolio-level risk management
 
@@ -417,172 +853,33 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 1. **Local-first**: PostgreSQL over cloud services for control and cost
 2. **Immutable data models**: Pydantic frozen=True, dataclass frozen=True for all calculation results
 3. **Explicit over implicit**: Type hints, validator methods, named parameters
-4. **Separation of concerns**: data/ (I/O), calculations/ (logic), db/ (persistence), cli/ (UI)
+4. **Separation of concerns**: data/ (I/O), calculations/ (logic), db/ (persistence), cli/ (UI), prediction/ (signals), dashboard/ (visualization)
 5. **No ORM for ingestion**: Raw psycopg for bulk upserts (performance)
 6. **Rate limiting**: Client-side token bucket to avoid 429s
 7. **Decimal precision**: Prices as Decimal to match DB NUMERIC(12,6)
 8. **UTC everywhere**: Avoid timezone bugs with explicit timezone.utc
 9. **Multi-timeframe first**: HTF defines trend direction, trading TF provides entries (core Drummond principle)
 10. **Frozen dataclasses**: All calculation results are immutable to prevent accidental mutations
+11. **Connection pooling**: psycopg_pool for improved performance
+12. **Query caching**: In-memory caching with TTL for frequently-accessed data
+13. **Calculation caching**: Specialized cache for expensive calculations with intelligent invalidation
+14. **Performance profiling**: Built-in profiling for calculations and queries
+15. **Unified configuration**: Bridge between new config files and legacy environment variables
+16. **Real-time dashboard**: Streamlit with WebSocket for live updates
 
 ---
 
-## Phase 4: Prediction System Architecture (In Progress)
+## Performance Considerations
 
-### Prediction Modules
-
-**prediction/persistence.py**
-- `PredictionPersistence(settings: Settings | None)`: Database persistence for prediction system
-  - `save_prediction_run(...)`: Save prediction cycle metadata with timing breakdown
-  - `get_recent_runs(limit, status)`: Retrieve recent prediction runs
-  - `save_generated_signals(run_id, signals)`: Bulk save trading signals
-  - `get_recent_signals(symbol, lookback_hours, min_confidence, limit)`: Query signals with filters
-  - `update_signal_outcome(signal_id, outcome, ...)`: Update signal with actual price data
-  - `save_metric(metric_type, metric_value, ...)`: Save performance/calibration metric
-  - `get_metrics(metric_type, lookback_hours, ...)`: Query metrics for analysis
-  - `update_scheduler_state(status, ...)`: Update singleton scheduler state
-  - `get_scheduler_state()`: Retrieve current scheduler status
-- Goal: CRUD operations for prediction runs, signals, metrics, and scheduler state
-
-**data/exchange_calendar.py** (COMPLETED Week 3)
-- `ExchangeCalendar(settings, use_cache)`: EODHD exchange API integration
-  - `fetch_exchange_details(exchange_code, from_date, to_date)`: Fetch exchange metadata from EODHD API
-  - `sync_exchange_calendar(exchange_code, force_refresh)`: Sync calendar to database (6 months back/forward)
-  - `is_trading_day(exchange_code, check_date)`: Check if date is trading day (queries database)
-  - `get_trading_hours(exchange_code, check_date)`: Get market open/close times including half-days
-- Database tables: exchanges (metadata, timezone, hours), market_holidays (holidays + half-days), trading_days (pre-computed calendar)
-- Supports half-day early close times (e.g., 1:00 PM on day after Thanksgiving)
-- Goal: Database-backed trading calendar from EODHD to minimize API calls and support market hours logic
-
-**prediction/scheduler.py** (COMPLETED Week 3)
-- `TradingSession(dataclass)`: Trading session configuration
-  - Fields: market_open (time), market_close (time), timezone (str), trading_days (list[str])
-  - Defaults: 9:30 AM - 4:00 PM ET, Monday-Friday
-  - Frozen dataclass with validation (market_open < market_close, valid timezone)
-- `SchedulerConfig(dataclass)`: Scheduler configuration
-  - Fields: interval (str), exchange_code (str), catch_up_on_start (bool), daemon_mode (bool)
-  - Interval parsing: "30min" → 30 minutes for APScheduler CronTrigger
-- `MarketHoursManager(exchange_code, session, calendar)`: Trading hours awareness with database-backed calendar
-  - `is_market_open(dt)`: Check if market is currently open (queries database for holidays/half-days)
-  - `next_market_open(from_dt)`: Calculate next market open time (skips weekends/holidays)
-  - `next_market_close(from_dt)`: Calculate next market close time (handles half-days)
-  - `is_trading_day(dt)`: Check if given datetime is trading day
-- `PredictionScheduler(config, engine, persistence, market_hours)`: APScheduler-based prediction orchestration
-  - `start()`: Start scheduler with APScheduler, run catch-up if enabled
-  - `stop(wait)`: Graceful shutdown with signal handling (SIGTERM, SIGINT)
-  - `run_once()`: Execute single prediction cycle manually (for testing)
-  - `_run_catch_up()`: Run comprehensive cycle from market open to now if started late
-  - `_execute_if_market_open()`: Execute cycle only if market is open (scheduled job)
-  - Uses APScheduler CronTrigger for interval alignment (e.g., :00 and :30 for 30min intervals)
-  - Thread-safe execution with locks to prevent concurrent cycles
-  - Catch-up logic: single comprehensive analysis from market open to current time
-- Goal: Automated prediction execution during market hours with APScheduler, recovery, and graceful shutdown
-
-**prediction/engine.py** (COMPLETED Week 2)
-- `SignalType(Enum)`: LONG, SHORT, EXIT_LONG, EXIT_SHORT
-- `GeneratedSignal(dataclass)`: Complete trading signal with context
-  - Fields: symbol, signal_timestamp, signal_type, entry_price, stop_loss, target_price
-  - Metrics: confidence, signal_strength, timeframe_alignment, risk_reward_ratio
-  - Context: htf_trend, trading_tf_state, confluence_zones_count, pattern_context, htf_timeframe, trading_timeframe
-  - Notification tracking: notification_sent, notification_channels, notification_timestamp
-- `SignalGenerator(coordinator, min_alignment_score, min_signal_strength, stop_loss_atr_multiplier, target_rr_ratio)`: Signal generation from multi-timeframe analysis
-  - `generate_signals(symbol, htf_data, trading_tf_data, ltf_data)`: Create actionable signals
-  - `_apply_entry_rules(analysis)`: Determine signal type based on HTF trend + alignment + confluence
-  - `_calculate_levels(signal_type, analysis, trading_tf_data)`: Calculate entry/stop/target using confluence zones
-  - `_calculate_confidence(analysis)`: Weighted score (alignment 30%, confluence 20%, HTF strength 25%, zones 15%, signal 10%)
-- `SignalAggregator(dedup_time_window_minutes, min_confidence, min_alignment)`: De-duplication and ranking
-  - `aggregate_signals(signals, min_confidence, min_alignment, enabled_patterns, max_signals)`: Filter, rank, deduplicate
-  - `_detect_duplicates(signals)`: Remove duplicates within time window, keep highest confidence
-  - `_rank_signals(signals)`: Rank by composite score (confidence × signal_strength × timeframe_alignment)
-- `PredictionRunResult(dataclass)`: Execution metrics from prediction cycle
-- `PredictionEngine(settings, persistence, signal_generator, lookback_bars)`: Prediction pipeline orchestration
-  - `execute_prediction_cycle(symbols, interval, timeframes, htf_interval, trading_interval, persist_results)`: Full cycle
-  - `_refresh_market_data(symbols, interval, errors)`: Incremental updates using incremental_update_intraday
-  - `_load_market_data(symbol, interval)`: Load recent bars from database
-  - `_calculate_timeframe_data(intervals, timeframe, classification)`: Recompute Drummond indicators
-  - `_signal_to_dict(signal)`: Convert GeneratedSignal to dict for persistence
-- Goal: Transform multi-timeframe analysis into actionable trading signals with complete orchestration
-
-**prediction/notifications/** (COMPLETED Week 4)
-- `NotificationConfig(dataclass)`: Configuration for notification delivery
-  - Fields: enabled_channels, discord_bot_token, discord_channel_id, discord_min_confidence, console_max_signals, console_format
-  - `from_env()`: Create config from environment variables (DGAS_DISCORD_BOT_TOKEN, DGAS_DISCORD_CHANNEL_ID)
-- `NotificationAdapter(ABC)`: Abstract base for notification channel implementations
-  - `send(signals, metadata)`: Send notifications (returns bool)
-  - `format_message(signals)`: Format signals for channel
-  - `should_notify(signal, min_confidence)`: Check if signal meets threshold
-- `NotificationRouter(config, adapters)`: Routes signals to configured notification channels
-  - `send_notifications(signals, run_metadata)`: Send notifications through all enabled channels
-  - `_filter_signals_for_channel(signals, channel)`: Filter signals based on channel-specific thresholds
-  - Handles errors gracefully, logs delivery status
-- `adapters/discord.py`: Discord bot integration with rich embeds
-  - `DiscordAdapter(bot_token, channel_id, rate_limit_delay, timeout)`: Discord Bot API integration
-  - `send(signals, metadata)`: Send signals as individual Discord embeds
-  - `_create_embed(signal, metadata)`: Create Discord embed object (Green for LONG, Red for SHORT)
-  - `_format_confidence_bar(confidence)`: Visual confidence bar using Unicode blocks
-  - `_send_to_discord(embeds)`: Send embeds via Discord API with rate limiting and retry logic
-  - Handles 429 rate limits with exponential backoff
-- `adapters/console.py`: Rich console table output
-  - `ConsoleAdapter(max_signals, output_format)`: Rich console table output
-  - `send(signals, metadata)`: Display signals in formatted Rich table
-  - `_display_summary_table(signals, metadata)`: Compact summary table with all signals
-  - `_display_detailed_table(signals, metadata)`: Detailed panel view per signal
-  - Supports "summary" and "detailed" output formats
-  - Color-coded confidence and alignment (green >0.7, yellow >0.5, dim <0.5)
-- Goal: Deliver signals through Discord (primary) and Console with rich formatting, proper error handling, and rate limiting
-
-**prediction/monitoring/** (Pending)
-- `PerformanceTracker(persistence)`: System performance monitoring
-  - `track_cycle(run_id, latency, throughput, errors)`: Record cycle metrics
-  - `get_performance_summary(lookback_hours)`: Aggregate statistics
-  - `check_sla_compliance()`: Verify SLA targets (latency, uptime, error rate)
-- `CalibrationEngine(persistence, evaluation_window_hours)`: Signal accuracy validation
-  - `evaluate_signal(signal, actual_prices)`: Compare signal to actual outcome
-  - `batch_evaluate(lookback_hours)`: Evaluate all pending signals
-  - `get_calibration_report(date_range)`: Win rate by confidence bucket
-- Goal: Track system performance and validate prediction accuracy
-
-### Database Schema (Migration 003)
-
-**prediction_runs table**
-- Tracks each scheduled prediction cycle
-- Fields: interval_type, symbols_requested, symbols_processed, signals_generated, execution_time_ms, status
-- Latency breakdown: data_fetch_ms, indicator_calc_ms, signal_generation_ms, notification_ms
-- Error tracking via errors TEXT[] array
-- Status: SUCCESS, PARTIAL, FAILED
-
-**generated_signals table**
-- All trading signals with rich context
-- Fields: signal_type, entry_price, stop_loss, target_price, confidence, signal_strength, timeframe_alignment
-- Context: htf_trend, trading_tf_state, confluence_zones_count, pattern_context (JSONB)
-- Notification tracking: notification_sent, notification_channels, notification_timestamp
-- Outcome tracking: outcome, actual_high, actual_low, actual_close, pnl_pct, evaluated_at
-- Signal types: LONG, SHORT, EXIT_LONG, EXIT_SHORT
-- Outcomes: WIN, LOSS, NEUTRAL, PENDING
-
-**prediction_metrics table**
-- Time-series performance and calibration metrics
-- Fields: metric_type, metric_value, aggregation_period, metadata (JSONB)
-- Metric types: latency_p95, throughput_avg, win_rate, accuracy, etc.
-- Aggregation periods: hourly, daily, weekly, monthly
-
-**scheduler_state table** (Singleton)
-- Scheduler status for recovery and monitoring
-- Fields: last_run_timestamp, next_scheduled_run, status, current_run_id, error_message
-- Status: IDLE, RUNNING, STOPPED, ERROR
-
-### Phase 4 Data Flow
-
-1. **Scheduler Trigger** (scheduled interval, e.g., 30min)
-2. **Market Hours Check** (skip if market closed)
-3. **Incremental Data Update** (fetch latest bars from EODHD)
-4. **Indicator Recalculation** (only for symbols with new data)
-5. **Signal Generation** (MultiTimeframeCoordinator → confidence scoring)
-6. **Signal Persistence** (save to generated_signals table)
-7. **Filtering & Ranking** (de-duplicate, apply thresholds)
-8. **Multi-Channel Notification** (console, email, webhook, desktop)
-9. **Performance Logging** (latency, throughput, errors)
-10. **Calibration Update** (periodic evaluation of past signals)
+- **Bulk operations**: Use executemany for multi-row inserts
+- **Indexing**: DESC indexes match ORDER BY timestamp DESC queries
+- **Connection pooling**: psycopg_pool for reduced connection overhead
+- **Caching**: Settings cached via @lru_cache, calculation results cached, query results cached
+- **Pandas**: Used only in calculations/ where vectorization helps (PLdot, envelopes)
+- **Decimal precision**: Trade-off between precision and performance (Decimal is slower than float but required for financial accuracy)
+- **Binary search**: OptimizedTimeframeData uses binary search for O(log n) timestamp lookups
+- **Optimized clustering**: OptimizedMultiTimeframeCoordinator uses O(n log n) sorting vs O(n²) nested loops
+- **Target**: <200ms per symbol/timeframe bundle (achieved through caching and optimizations)
 
 ---
 
@@ -595,6 +892,7 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 4. Use pandas for rolling/windowed operations if needed
 5. Add corresponding DB table in migrations/ if persisting
 6. Write persistence method in db/persistence.py if needed
+7. Consider adding to CalculationCache for performance
 
 ### Extending ingestion
 1. Add new method to EODHDClient (follow fetch_intraday pattern)
@@ -602,114 +900,77 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 3. Add quality checks to quality.analyze_intervals if needed
 4. Create ingestion function in ingestion.py using _client_context
 5. Return IngestionSummary with quality report
+6. Register data update with CacheInvalidationManager
 
 ### Adding CLI commands
 1. Add subparser in __main__.build_parser()
-2. Handle in __main__.main() with args.command check
-3. Import and call relevant functions from modules
-4. Use Rich for formatted output (tables, panels, colors)
-5. Return 0 on success, nonzero on failure
+2. Create setup_*_parser function in cli/ module
+3. Handle in __main__.main() with args.func or args.command check
+4. Import and call relevant functions from modules
+5. Use Rich for formatted output (tables, panels, colors)
+6. Return 0 on success, nonzero on failure
 
 ### Multi-timeframe analysis workflow
 1. Load data for HTF and trading TF using load_market_data()
-2. Calculate indicators for each TF (calculate_indicators())
+2. Calculate indicators for each TF (build_timeframe_data() or calculate_indicators())
 3. Create TimeframeData objects with classification (HIGHER/TRADING)
-4. Instantiate MultiTimeframeCoordinator with TF intervals
+4. Instantiate MultiTimeframeCoordinator (or OptimizedMultiTimeframeCoordinator) with TF intervals
 5. Call coordinator.analyze(htf_data, trading_tf_data)
 6. Use analysis.signal_strength and analysis.recommended_action for trading decisions
 7. Optionally save via DrummondPersistence.save_multi_timeframe_analysis()
 
----
-
-## Performance Considerations
-
-- **Bulk operations**: Use executemany for multi-row inserts
-- **Indexing**: DESC indexes match ORDER BY timestamp DESC queries
-- **Connection pooling**: Not yet implemented (single connection per transaction via get_connection)
-- **Caching**: Settings cached via @lru_cache, consider data caching later
-- **Pandas**: Used only in calculations/ where vectorization helps (PLdot, envelopes)
-- **Decimal precision**: Trade-off between precision and performance (Decimal is slower than float but required for financial accuracy)
-
----
-
-## Future Optimizations
-
-- Connection pooling (psycopg_pool) for concurrent workflows
-- Incremental calculation updates (avoid recomputing entire history)
-- Materialized views for common aggregations (signal strength, alignment scores)
-- Partitioning market_data by timestamp range
-- Async EODHD client for parallel symbol ingestion
-- Pre-computed quality metrics in market_data_metadata table
-- Caching of recent multi-timeframe analyses
+### Adding dashboard pages
+1. Create page module in dashboard/pages/
+2. Implement render() function
+3. Import and register in dashboard/app.py
+4. Add to sidebar navigation in render_sidebar()
+5. Use dashboard/components/ for reusable components
+6. Consider real-time updates via realtime_client.py
 
 ---
 
 ## Anti-Patterns to Avoid
 
-? Mixing sync and async (all code is synchronous for simplicity)
-? String SQL without parameters (always use %s placeholders)
-? Float for prices (use Decimal to match DB precision)
-? Naive datetimes (always set tzinfo=timezone.utc)
-? Global state (use dependency injection: client, conn args)
-? Catching bare Exception without logging/re-raise
-? Mutating Pydantic models or frozen dataclasses (all are frozen=True)
-? Hardcoding timeframes (use constants or settings)
-? Ignoring HTF trend direction (core Drummond principle)
-
----
-
-## Deployment Notes
-
-### PostgreSQL Setup
-- User: fireworks_app (change default password!)
-- Database: dgas
-- Run: `uv run python -m dgas.db.migrations` to apply schema
-- See docs/setup_postgres.md for role creation SQL
-
-### Environment Variables
-```bash
-EODHD_API_TOKEN=your_token_here
-DGAS_DATABASE_URL=postgresql://user:pass@localhost:5432/dgas
-DGAS_DATA_DIR=/path/to/data
-EODHD_REQUESTS_PER_MINUTE=80
-```
-
-### Dependency Installation
-```bash
-uv venv && source .venv/bin/activate
-uv pip install -e .[dev]
-```
-
-### Quality Checks
-```bash
-ruff check src tests
-ruff format src tests
-mypy src
-pytest
-```
+✗ Mixing sync and async (all code is synchronous for simplicity)
+✗ String SQL without parameters (always use %s placeholders)
+✗ Float for prices (use Decimal to match DB precision)
+✗ Naive datetimes (always set tzinfo=timezone.utc)
+✗ Global state (use dependency injection: client, conn args)
+✗ Catching bare Exception without logging/re-raise
+✗ Mutating Pydantic models or frozen dataclasses (all are frozen=True)
+✗ Hardcoding timeframes (use constants or settings)
+✗ Ignoring HTF trend direction (core Drummond principle)
+✗ Bypassing connection pool (use get_db_connection() instead of direct connections)
+✗ Not using query cache for frequently-accessed data
+✗ Not profiling slow calculations
 
 ---
 
 ## Veteran Developer Observations
 
 ### Architecture Strengths
-1. **Clear separation of concerns**: data/, calculations/, db/, cli/ are well-defined boundaries
+1. **Clear separation of concerns**: data/, calculations/, db/, cli/, prediction/, dashboard/ are well-defined boundaries
 2. **Type safety**: Comprehensive type hints and Pydantic validation catch errors early
 3. **Immutable data structures**: Frozen dataclasses prevent accidental mutations
-4. **DRY principle**: Reusable repository functions, shared quality checks, factory methods
+4. **DRY principle**: Reusable repository functions, shared quality checks, factory methods, unified configuration
 5. **Multi-timeframe first**: Core Drummond principle is properly implemented with HTF trend filtering
+6. **Performance optimizations**: Connection pooling, query caching, calculation caching, profiling built-in
+7. **Unified configuration**: Seamless bridge between new config files and legacy environment variables
+8. **Real-time capabilities**: WebSocket support for live dashboard updates
+9. **Comprehensive monitoring**: Performance tracking, calibration, SLA compliance built-in
 
 ### Areas for Improvement
-1. **Connection pooling**: Currently using single connections per transaction - consider psycopg_pool for concurrent operations
-2. **Error handling**: Some areas could benefit from more specific exception types (e.g., CalculationError, PersistenceError)
-3. **Logging**: Consider structured logging (structlog is in dependencies but not extensively used)
-4. **Testing**: Some calculation modules could use more edge case coverage
-5. **Documentation**: Inline docstrings are good, but some complex algorithms (multi-timeframe coordination) could use more explanation
+1. **Error handling**: Some areas could benefit from more specific exception types (e.g., CalculationError, PersistenceError)
+2. **Logging**: Consider structured logging (structlog is in dependencies but not extensively used)
+3. **Testing**: Some calculation modules could use more edge case coverage
+4. **Documentation**: Inline docstrings are good, but some complex algorithms (multi-timeframe coordination) could use more explanation
+5. **Async support**: Consider async/await for I/O-bound operations (database, API calls) in future versions
+6. **Distributed caching**: Current caching is in-memory; consider Redis for multi-process deployments
 
 ### Code Quality
 - **Readability**: High - clear function names, good type hints, logical structure
 - **Maintainability**: High - modular design, clear boundaries, easy to extend
-- **Performance**: Good for current scale - may need optimization for high-frequency analysis
+- **Performance**: Excellent - connection pooling, caching, profiling, optimizations achieve <200ms target
 - **Testability**: Good - functions are pure where possible, dependencies are injectable
 
 ### Data Model Consistency
@@ -719,10 +980,21 @@ pytest
 - **Enum usage**: Consistent use of Enums for state types, pattern types, trend directions (good)
 
 ### Design Patterns
-- **Factory pattern**: IntervalData.from_api_record, EODHDConfig.from_settings
-- **Strategy pattern**: EnvelopeCalculator methods (pldot_range, atr, percentage)
-- **Context manager pattern**: get_connection, _client_context, DrummondPersistence
+- **Factory pattern**: IntervalData.from_api_record, EODHDConfig.from_settings, ConfigLoader.generate_sample_config
+- **Strategy pattern**: EnvelopeCalculator methods (pldot_range, atr, percentage), NotificationAdapter implementations
+- **Context manager pattern**: get_connection, get_db_connection, _client_context, DrummondPersistence
 - **Repository pattern**: data/repository.py for data access abstraction
+- **Adapter pattern**: UnifiedSettings bridges new config system and legacy Settings
+- **Singleton pattern**: Global instances for cache managers, profilers, connection pools
+- **Observer pattern**: DataUpdateListener for cache invalidation on data updates
+
+### Performance Architecture
+- **Connection pooling**: Reduces connection overhead, especially important for prediction cycles processing multiple symbols
+- **Query caching**: Reduces database load for frequently-accessed data (dashboard queries, signal lookups)
+- **Calculation caching**: Specialized cache for expensive calculations with intelligent invalidation
+- **Profiling**: Built-in profiling for calculations and queries to identify bottlenecks
+- **Optimizations**: Binary search for timestamp lookups, optimized clustering algorithms, early termination
+- **Target achieved**: <200ms per symbol/timeframe bundle through comprehensive optimization
 
 ---
 

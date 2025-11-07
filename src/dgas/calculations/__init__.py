@@ -22,6 +22,7 @@ from .multi_timeframe import (
     TimeframeData,
     TimeframeType,
 )
+from .timeframe_builder import build_timeframe_data
 
 __all__ = [
     "PLDotCalculator",
@@ -50,4 +51,5 @@ __all__ = [
     "TimeframeAlignment",
     "PLDotOverlay",
     "ConfluenceZone",
+    "build_timeframe_data",
 ]

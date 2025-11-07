@@ -22,6 +22,7 @@ def run_backtest_command(
     *,
     symbols: Sequence[str],
     interval: str,
+    htf_interval: str | None = None,
     strategy: str,
     strategy_params: Mapping[str, str],
     start: str | None,
@@ -40,6 +41,7 @@ def run_backtest_command(
         request = BacktestRequest(
             symbols=list(symbols),
             interval=interval,
+            htf_interval=htf_interval,
             start=_parse_datetime(start),
             end=_parse_datetime(end),
             strategy_name=strategy,

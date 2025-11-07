@@ -16,6 +16,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",  # Ignore extra fields from .env that aren't in this class
     )
 
     eodhd_api_token: str | None = Field(default=None, alias="EODHD_API_TOKEN")

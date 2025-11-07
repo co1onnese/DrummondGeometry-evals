@@ -1,5 +1,7 @@
 """Core package for the Drummond Geometry Analysis System."""
 
+from __future__ import annotations
+
 from importlib.metadata import version
 
 __all__ = ["get_version"]

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 
 import pytest
@@ -17,6 +17,7 @@ from dgas.backtesting import (
     Trade,
 )
 from dgas.backtesting.metrics import PerformanceSummary
+from dgas.calculations.multi_timeframe import MultiTimeframeAnalysis
 from dgas.data.models import IntervalData
 
 
@@ -205,3 +206,62 @@ class _DummyContextManager:
 
     def __exit__(self, exc_type, exc_val, exc_tb):  # pragma: no cover
         return False
+
+
+class StubEngine:
+    def __init__(self, result: BacktestResult) -> None:
+        self.result = result
+        self.dataset: BacktestDataset | None = None
+        self.strategy = None
+
+    def run(self, dataset: BacktestDataset, strategy) -> BacktestResult:
+        self.dataset = dataset
+        self.strategy = strategy
+        return self.result
+
+
+def test_runner_loads_multi_timeframe_analysis(monkeypatch: pytest.MonkeyPatch) -> None:
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    trading_interval = "1h"
+    htf_interval = "4h"
+
+    trading_bars = [
+        BacktestBar(bar=_interval_data(start + timedelta(hours=i), str(100 + i)))
+        for i in range(6)
+    ]
+    htf_bars = [
+        _interval_data(start + timedelta(hours=4 * i), str(100 + 0.5 * i))
+        for i in range(4)
+    ]
+
+    def fake_load(symbol, interval, *, start=None, end=None, limit=None, conn=None):
+        if interval == trading_interval:
+            return [bar.bar for bar in trading_bars]
+        if interval == htf_interval:
+            return htf_bars
+        return []
+
+    monkeypatch.setattr("dgas.backtesting.data_loader.load_ohlcv", fake_load)
+
+    test_result = _backtest_result(start)
+    engine = StubEngine(test_result)
+
+    monkeypatch.setattr(
+        "dgas.backtesting.runner.calculate_performance",
+        lambda _result, risk_free_rate=Decimal("0"): StubPerformance(),
+    )
+
+    runner = BacktestRunner(engine=engine)
+    request = BacktestRequest(
+        symbols=["AAPL"],
+        interval=trading_interval,
+        htf_interval=htf_interval,
+        persist_results=False,
+    )
+
+    runner.run(request)
+
+    assert engine.dataset is not None
+    last_bar = engine.dataset.bars[-1]
+    assert "analysis" in last_bar.indicators
+    assert isinstance(last_bar.indicators["analysis"], MultiTimeframeAnalysis)

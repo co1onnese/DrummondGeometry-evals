@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 
+from dgas.calculations.drummond_lines import DrummondZone
 from dgas.calculations.envelopes import EnvelopeSeries
 from dgas.calculations.multi_timeframe import (
     ConfluenceZone,
@@ -84,6 +85,17 @@ def create_state_series(
             )
         )
     return series
+
+
+def create_drummond_zone(center: float, width: float, line_type: str = "support", strength: int = 2) -> DrummondZone:
+    half = width / 2
+    return DrummondZone(
+        center_price=Decimal(str(center)),
+        lower_price=Decimal(str(center - half)),
+        upper_price=Decimal(str(center + half)),
+        line_type=line_type,
+        strength=strength,
+    )
 
 
 class TestMultiTimeframeCoordinator:
@@ -314,6 +326,114 @@ class TestMultiTimeframeCoordinator:
         # Strongest zone should have 2+ timeframes
         strongest = analysis.confluence_zones[0]
         assert strongest.strength >= 2
+        assert strongest.weighted_strength >= Decimal("2.0")
+        assert strongest.volatility > Decimal("0")
+
+    def test_confluence_zones_include_drummond_lines(self):
+        start_time = datetime(2025, 1, 1, 0, 0)
+
+        htf_pldot = create_pldot_series(100.0, 0.1, 5, start_time)
+        htf_envelopes = create_envelope_series(htf_pldot, 3.0)
+        htf_states = create_state_series(
+            [p.timestamp for p in htf_pldot],
+            MarketState.TREND,
+            TrendDirection.UP,
+        )
+
+        htf_zones = [create_drummond_zone(99.0, 1.2, "support", strength=3)]
+
+        htf_data = TimeframeData(
+            timeframe="4h",
+            classification=TimeframeType.HIGHER,
+            pldot_series=htf_pldot,
+            envelope_series=htf_envelopes,
+            state_series=htf_states,
+            pattern_events=[],
+            drummond_zones=tuple(htf_zones),
+        )
+
+        trading_pldot = create_pldot_series(99.8, 0.05, 5, start_time)
+        trading_envelopes = create_envelope_series(trading_pldot, 2.0)
+        trading_states = create_state_series(
+            [p.timestamp for p in trading_pldot],
+            MarketState.TREND,
+            TrendDirection.UP,
+        )
+        trading_zones = [create_drummond_zone(99.1, 0.8, "support", strength=2)]
+
+        trading_data = TimeframeData(
+            timeframe="1h",
+            classification=TimeframeType.TRADING,
+            pldot_series=trading_pldot,
+            envelope_series=trading_envelopes,
+            state_series=trading_states,
+            pattern_events=[],
+            drummond_zones=tuple(trading_zones),
+        )
+
+        coordinator = MultiTimeframeCoordinator("4h", "1h", confluence_tolerance_pct=1.5)
+        analysis = coordinator.analyze(htf_data, trading_data)
+
+        assert analysis.confluence_zones
+        zone = analysis.confluence_zones[0]
+        assert zone.zone_type == "support"
+        assert zone.strength >= 2
+        assert zone.weighted_strength >= Decimal("3.0")
+        assert "drummond_zone" in zone.sources.values()
+
+    def test_zone_weighting_prefers_higher_timeframe(self):
+        start_time = datetime(2025, 1, 1, 0, 0)
+
+        htf_pldot = create_pldot_series(100.0, 0.05, 5, start_time)
+        htf_envelopes = create_envelope_series(htf_pldot, 2.5)
+        htf_states = create_state_series(
+            [p.timestamp for p in htf_pldot],
+            MarketState.TREND,
+            TrendDirection.UP,
+        )
+
+        htf_support_zone = create_drummond_zone(99.5, 1.0, "support", strength=4)
+        htf_resistance_zone = create_drummond_zone(105.0, 1.0, "resistance", strength=2)
+
+        htf_data = TimeframeData(
+            timeframe="4h",
+            classification=TimeframeType.HIGHER,
+            pldot_series=htf_pldot,
+            envelope_series=htf_envelopes,
+            state_series=htf_states,
+            pattern_events=[],
+            drummond_zones=(htf_support_zone, htf_resistance_zone),
+        )
+
+        trading_pldot = create_pldot_series(100.0, 0.02, 5, start_time)
+        trading_envelopes = create_envelope_series(trading_pldot, 2.0)
+        trading_states = create_state_series(
+            [p.timestamp for p in trading_pldot],
+            MarketState.TREND,
+            TrendDirection.UP,
+        )
+
+        trading_support_zone = create_drummond_zone(99.6, 0.6, "support", strength=1)
+        trading_resistance_zone = create_drummond_zone(110.0, 0.8, "resistance", strength=4)
+
+        trading_data = TimeframeData(
+            timeframe="1h",
+            classification=TimeframeType.TRADING,
+            pldot_series=trading_pldot,
+            envelope_series=trading_envelopes,
+            state_series=trading_states,
+            pattern_events=[],
+            drummond_zones=(trading_support_zone, trading_resistance_zone),
+        )
+
+        coordinator = MultiTimeframeCoordinator("4h", "1h", confluence_tolerance_pct=1.0)
+        analysis = coordinator.analyze(htf_data, trading_data)
+
+        assert analysis.confluence_zones
+        # Highest weighted zone should correspond to HTF support near 99.5
+        top_zone = analysis.confluence_zones[0]
+        assert abs(top_zone.level - Decimal("99.5")) < Decimal("0.5")
+        assert top_zone.weighted_strength >= Decimal("4.5")
 
     def test_pattern_confluence(self):
         """Test pattern alignment across timeframes."""

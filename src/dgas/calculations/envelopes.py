@@ -25,13 +25,17 @@ class EnvelopeSeries:
 
 
 class EnvelopeCalculator:
-    """
-    Compute Drummond Geometry envelope bands around PLdot.
+    """Compute Drummond Geometry envelope bands around PLdot.
 
-    Methods:
-    - pldot_range: Drummond's 3-period method (DEFAULT, recommended)
-    - atr: ATR-based bands (for comparison/legacy)
-    - percentage: Fixed percentage bands
+    The default ``pldot_range`` method mirrors Charles Drummond's guidance: it
+    measures the short-term ``PLdot`` volatility (three-bar sample standard
+    deviation) and projects adaptive envelopes that represent the market's
+    expected energy range. This forward-looking approach preserves the
+    methodology's emphasis on probabilities rather than fixed-width bands.
+
+    Alternate methods (``atr`` and ``percentage``) remain available for
+    comparison and legacy support, but the recommended configuration is
+    ``pldot_range`` with a three-bar window and 1.5x multiplier.
     """
 
     def __init__(self, method: str = "pldot_range", period: int = 3, multiplier: float = 1.5, percent: float = 0.02) -> None:

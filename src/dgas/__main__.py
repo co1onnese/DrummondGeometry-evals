@@ -8,6 +8,13 @@ from pathlib import Path
 
 from . import get_version
 from .cli import run_analyze_command, run_backtest_command
+from .cli.configure import setup_configure_parser
+from .cli.data import setup_data_parser
+from .cli.monitor import setup_monitor_parser
+from .cli.predict import setup_predict_parser
+from .cli.report import setup_report_parser
+from .cli.scheduler_cli import setup_scheduler_parser
+from .cli.status_cli import setup_status_parser
 from .monitoring import generate_ingestion_report, render_markdown_report, write_report
 
 
@@ -23,6 +30,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="command")
+
+    # Configure command
+    setup_configure_parser(subparsers)
+
+    # Data command
+    setup_data_parser(subparsers)
+
+    # Predict command
+    setup_predict_parser(subparsers)
+
+    # Report command
+    setup_report_parser(subparsers)
+
+    # Scheduler command
+    setup_scheduler_parser(subparsers)
+
+    # Status command
+    setup_status_parser(subparsers)
+
+    # Monitor command
+    setup_monitor_parser(subparsers)
 
     # Analyze command
     analyze_parser = subparsers.add_parser(
@@ -65,6 +93,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="summary",
         help="Output format (default: summary)",
     )
+    analyze_parser.add_argument(
+        "--config",
+        type=Path,
+        help="Path to configuration file (default: auto-detect)",
+    )
 
     # Backtest command
     backtest_parser = subparsers.add_parser(
@@ -80,6 +113,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--interval",
         default="1h",
         help="Interval to backtest (default: 1h)",
+    )
+    backtest_parser.add_argument(
+        "--htf",
+        "--htf-interval",
+        dest="htf_interval",
+        default="1d",
+        help="Higher timeframe interval for trend context (default: 1d)",
     )
     backtest_parser.add_argument(
         "--strategy",
@@ -146,6 +186,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Limit number of most recent bars (for debugging)",
     )
+    backtest_parser.add_argument(
+        "--config",
+        type=Path,
+        help="Path to configuration file (default: auto-detect)",
+    )
 
     # Data report command
     report_parser = subparsers.add_parser(
@@ -162,6 +207,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Optional path to write the report as Markdown",
     )
+    report_parser.add_argument(
+        "--config",
+        type=Path,
+        help="Path to configuration file (default: auto-detect)",
+    )
 
     return parser
 
@@ -174,6 +224,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Drummond Geometry Analysis System {get_version()}")
         return 0
 
+    # Commands that use func attribute (new pattern)
+    if hasattr(args, "func"):
+        return args.func(args)
+
+    # Legacy commands (analyze, backtest, data-report)
     if args.command == "analyze":
         return run_analyze_command(
             symbols=args.symbols,
@@ -189,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_backtest_command(
             symbols=args.symbols,
             interval=args.interval,
+            htf_interval=args.htf_interval,
             strategy=args.strategy,
             strategy_params=strategy_params,
             start=args.start,

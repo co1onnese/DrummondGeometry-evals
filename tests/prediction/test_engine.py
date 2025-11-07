@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -155,6 +156,50 @@ class TestSignalGenerator:
         signals = generator.generate_signals("AAPL", htf_data, trading_data)
 
         assert len(signals) == 0  # No signal when trade not permitted
+
+    def test_generate_signals_requires_zone_weight(self, sample_long_analysis, sample_timeframe_data):
+        coordinator = MultiTimeframeCoordinator("4h", "1h")
+        generator = SignalGenerator(coordinator)
+
+        weak_zone = replace(
+            sample_long_analysis.confluence_zones[0],
+            weighted_strength=Decimal("1.0"),
+        )
+        analysis = replace(sample_long_analysis, confluence_zones=[weak_zone])
+
+        coordinator.analyze = lambda *_args, **_kwargs: analysis
+        htf_data, trading_data = sample_timeframe_data
+
+        signals = generator.generate_signals("AAPL", htf_data, trading_data)
+        assert signals == []
+
+    def test_generate_signals_exit_on_reduce(self, sample_long_analysis, sample_timeframe_data):
+        coordinator = MultiTimeframeCoordinator("4h", "1h")
+        generator = SignalGenerator(coordinator)
+
+        exit_analysis = replace(sample_long_analysis, recommended_action="reduce")
+        coordinator.analyze = lambda *_args, **_kwargs: exit_analysis
+
+        htf_data, trading_data = sample_timeframe_data
+        signals = generator.generate_signals("AAPL", htf_data, trading_data)
+
+        assert len(signals) == 1
+        assert signals[0].signal_type == SignalType.EXIT_LONG
+
+    def test_generate_signals_requires_pattern_support(self, sample_long_analysis, sample_timeframe_data):
+        coordinator = MultiTimeframeCoordinator("4h", "1h")
+        generator = SignalGenerator(coordinator)
+
+        analysis = replace(
+            sample_long_analysis,
+            htf_patterns=[],
+            trading_tf_patterns=[],
+        )
+        coordinator.analyze = lambda *_args, **_kwargs: analysis
+
+        htf_data, trading_data = sample_timeframe_data
+        signals = generator.generate_signals("AAPL", htf_data, trading_data)
+        assert signals == []
 
     def test_confidence_calculation_with_all_factors(self, sample_long_analysis, sample_timeframe_data):
         """Test confidence calculation includes all factors."""
@@ -414,6 +459,9 @@ def sample_long_analysis():
             zone_type="support",
             first_touch=now - timedelta(hours=24),
             last_touch=now,
+            weighted_strength=Decimal("3.2"),
+            sources={"4h": "drummond_zone", "1h": "envelope_lower"},
+            volatility=Decimal("0.4"),
         )
     ]
 
@@ -486,6 +534,19 @@ def sample_short_analysis():
             zone_type="resistance",
             first_touch=now - timedelta(hours=24),
             last_touch=now,
+            weighted_strength=Decimal("3.0"),
+            sources={"4h": "drummond_zone", "1h": "envelope_upper"},
+            volatility=Decimal("0.35"),
+        )
+    ]
+
+    htf_patterns = [
+        PatternEvent(
+            pattern_type=PatternType.PLDOT_PUSH,
+            direction=-1,
+            start_timestamp=now - timedelta(hours=4),
+            end_timestamp=now,
+            strength=3,
         )
     ]
 
@@ -500,7 +561,7 @@ def sample_short_analysis():
         alignment=alignment,
         pldot_overlay=pldot_overlay,
         confluence_zones=confluence_zones,
-        htf_patterns=[],
+        htf_patterns=htf_patterns,
         trading_tf_patterns=[],
         pattern_confluence=False,
         signal_strength=Decimal("0.70"),

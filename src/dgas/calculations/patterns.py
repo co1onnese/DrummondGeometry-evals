@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Iterable, List, Sequence
+import statistics
+from typing import Callable, List, Sequence
 
 from .envelopes import EnvelopeSeries
 from .pldot import PLDotSeries
@@ -28,6 +29,39 @@ class PatternEvent:
     start_timestamp: datetime
     end_timestamp: datetime
     strength: int
+
+
+@dataclass(frozen=True)
+class PLDotRefreshConfig:
+    base_tolerance: float = 0.1
+    volatility_lookback: int = 5
+    volatility_multiplier: float = 1.0
+    min_far_bars: int = 2
+    max_return_bars: int = 4
+    min_extension: float = 0.05
+    confirmation: Callable[[datetime, int], bool] | None = None
+
+
+@dataclass(frozen=True)
+class ExhaustConfig:
+    extension_threshold: float = 2.0
+    min_extension_bars: int = 2
+    max_recovery_bars: int = 3
+    min_reversion_ratio: float = 0.4
+    slope_reversal_limit: float = 0.0
+
+
+@dataclass(frozen=True)
+class CWaveConfig:
+    min_bars: int = 3
+    upper_position_threshold: float = 0.9
+    lower_position_threshold: float = 0.1
+    min_slope: float = 0.0
+    min_slope_acceleration: float = 0.0
+    min_envelope_expansion: float = 0.0
+    require_volume_confirmation: bool = False
+    volume_multiplier: float = 1.2
+    volume_lookback: int = 3
 
 
 def detect_pldot_push(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries]) -> List[PatternEvent]:
@@ -67,29 +101,69 @@ def detect_pldot_push(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSe
     return events
 
 
-def detect_pldot_refresh(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries], tolerance: float = 0.1) -> List[PatternEvent]:
+def detect_pldot_refresh(
+    intervals: Sequence[IntervalData],
+    pldot: Sequence[PLDotSeries],
+    tolerance: float | None = None,
+    config: PLDotRefreshConfig | None = None,
+) -> List[PatternEvent]:
     close_map = {bar.timestamp: bar.close for bar in intervals}
     ordered = sorted(pldot, key=lambda s: s.timestamp)
+
+    cfg = config or PLDotRefreshConfig()
+    if tolerance is not None:
+        cfg = replace(cfg, base_tolerance=tolerance)
+
+    max_return_bars = max(cfg.max_return_bars, cfg.min_far_bars)
+
+    far_sequence: List[tuple[PLDotSeries, float]] = []
+    direction = 0
+    max_diff = 0.0
     events: List[PatternEvent] = []
 
-    far_sequence: List[PLDotSeries] = []
-    direction = 0
-
-    for series in ordered:
+    for idx, series in enumerate(ordered):
         close_price = close_map.get(series.timestamp)
         if close_price is None:
             continue
 
+        dynamic_tolerance = cfg.base_tolerance
+        if cfg.volatility_multiplier > 0 and cfg.volatility_lookback > 1:
+            window_start = max(0, idx - cfg.volatility_lookback + 1)
+            window = [float(entry.value) for entry in ordered[window_start : idx + 1]]
+            if len(window) >= cfg.volatility_lookback:
+                volatility = statistics.pstdev(window[-cfg.volatility_lookback :])
+                dynamic_tolerance += volatility * cfg.volatility_multiplier
+
         diff = abs(float(close_price - series.value))
-        if diff > tolerance:
-            far_sequence.append(series)
-            direction = _compare(close_price, series.value)
-        else:
-            if len(far_sequence) >= 2 and direction != 0:
-                streak = far_sequence + [series]
-                events.append(_build_event(PatternType.PLDOT_REFRESH, streak, -direction))
+        side = _compare(close_price, series.value)
+
+        if diff > dynamic_tolerance and side != 0:
+            if far_sequence and side != direction:
+                far_sequence = []
+                max_diff = 0.0
+            far_sequence.append((series, diff))
+            direction = side
+            max_diff = max(max_diff, diff)
+            continue
+
+        if far_sequence and direction != 0:
+            bars_away = len(far_sequence)
+            if (
+                bars_away >= cfg.min_far_bars
+                and bars_away <= max_return_bars
+                and max_diff >= cfg.min_extension
+            ):
+                event_direction = -direction
+                if cfg.confirmation is None or cfg.confirmation(series.timestamp, event_direction):
+                    streak = [entry for entry, _ in far_sequence] + [series]
+                    events.append(_build_event(PatternType.PLDOT_REFRESH, streak, event_direction))
             far_sequence = []
             direction = 0
+            max_diff = 0.0
+        else:
+            far_sequence = []
+            direction = 0
+            max_diff = 0.0
 
     return events
 
@@ -99,131 +173,149 @@ def detect_exhaust(
     pldot: Sequence[PLDotSeries],
     envelopes: Sequence[EnvelopeSeries],
     extension_threshold: float = 2.0,
+    config: ExhaustConfig | None = None,
 ) -> List[PatternEvent]:
-    """
-    Detect exhaust patterns where price extends far beyond envelope then reverses.
+    cfg = config or ExhaustConfig()
+    if extension_threshold != cfg.extension_threshold:
+        cfg = replace(cfg, extension_threshold=extension_threshold)
 
-    An exhaust occurs when:
-    1. Price moves significantly beyond envelope (>threshold * envelope width)
-    2. Then sharply reverses back toward PLdot
-    3. Signals momentum depletion and potential turning point
-
-    Args:
-        intervals: Price bars
-        pldot: PLdot series
-        envelopes: Envelope bands
-        extension_threshold: How many envelope widths price must extend (default: 2.0)
-
-    Returns:
-        List of detected exhaust patterns
-    """
-    # Create timestamp-aligned lookup maps
     close_map = {bar.timestamp: bar.close for bar in intervals}
-    pldot_map = {p.timestamp: p.value for p in pldot}
-    envelope_dict = {e.timestamp: e for e in envelopes}
-
+    slope_map = {p.timestamp: p.slope for p in pldot}
     ordered_envelopes = sorted(envelopes, key=lambda e: e.timestamp)
 
     events: List[PatternEvent] = []
-    extension_sequence: List[tuple[datetime, EnvelopeSeries, Decimal]] = []
-    direction = 0  # 1=bullish extension, -1=bearish extension
+    extension_bars: List[tuple[datetime, Decimal, Decimal | None, EnvelopeSeries]] = []
+    direction = 0
+    recovery_counter = 0
 
-    for i, envelope in enumerate(ordered_envelopes):
+    for envelope in ordered_envelopes:
         close_price = close_map.get(envelope.timestamp)
-        pldot_value = pldot_map.get(envelope.timestamp)
-
-        if close_price is None or pldot_value is None:
+        if close_price is None:
             continue
 
-        # Calculate how far beyond envelope the price is
         width = float(envelope.width)
-        center = float(envelope.center)
+        if width <= 0:
+            extension_bars = []
+            direction = 0
+            recovery_counter = 0
+            continue
+
         upper = float(envelope.upper)
         lower = float(envelope.lower)
         close_f = float(close_price)
 
-        # Check for upward extension beyond upper envelope
+        side = 0
+        extension_ratio = 0.0
         if close_f > upper:
-            extension = (close_f - upper) / width if width > 0 else 0
-
-            if extension >= extension_threshold:
-                # Significant upward extension
-                if direction == 1 or direction == 0:
-                    extension_sequence.append((envelope.timestamp, envelope, close_price))
-                    direction = 1
-                else:
-                    # Direction changed - previous was exhaust
-                    extension_sequence = [(envelope.timestamp, envelope, close_price)]
-                    direction = 1
-            else:
-                # Check for reversal (back toward PLdot)
-                if len(extension_sequence) >= 2 and direction == 1:
-                    # Was extended, now reversing
-                    if close_f < extension_sequence[-1][2]:  # type: ignore
-                        # Create exhaust event
-                        events.append(
-                            PatternEvent(
-                                pattern_type=PatternType.EXHAUST,
-                                direction=-1,  # Bearish signal after bullish extension
-                                start_timestamp=extension_sequence[0][0],
-                                end_timestamp=envelope.timestamp,
-                                strength=len(extension_sequence),
-                            )
-                        )
-                extension_sequence = []
-                direction = 0
-
-        # Check for downward extension beyond lower envelope
+            side = 1
+            extension_ratio = (close_f - upper) / width
         elif close_f < lower:
-            extension = (lower - close_f) / width if width > 0 else 0
+            side = -1
+            extension_ratio = (lower - close_f) / width
 
-            if extension >= extension_threshold:
-                # Significant downward extension
-                if direction == -1 or direction == 0:
-                    extension_sequence.append((envelope.timestamp, envelope, close_price))
-                    direction = -1
-                else:
-                    # Direction changed
-                    extension_sequence = [(envelope.timestamp, envelope, close_price)]
-                    direction = -1
-            else:
-                # Check for reversal
-                if len(extension_sequence) >= 2 and direction == -1:
-                    if close_f > extension_sequence[-1][2]:  # type: ignore
-                        # Create exhaust event
-                        events.append(
-                            PatternEvent(
-                                pattern_type=PatternType.EXHAUST,
-                                direction=1,  # Bullish signal after bearish extension
-                                start_timestamp=extension_sequence[0][0],
-                                end_timestamp=envelope.timestamp,
-                                strength=len(extension_sequence),
-                            )
-                        )
-                extension_sequence = []
-                direction = 0
+        if side != 0 and extension_ratio >= cfg.extension_threshold:
+            if direction not in (0, side):
+                extension_bars = []
+            extension_bars.append((envelope.timestamp, close_price, slope_map.get(envelope.timestamp), envelope))
+            direction = side
+            recovery_counter = 0
+            continue
 
-        # Price within envelope - reset
-        else:
-            if len(extension_sequence) >= 2:
-                # Create exhaust on return to envelope
-                exhaust_direction = -1 if direction == 1 else 1
+        if direction != 0:
+            recovery_counter += 1
+            is_inside = (direction == 1 and close_f <= upper) or (direction == -1 and close_f >= lower)
+            if (
+                is_inside
+                and len(extension_bars) >= cfg.min_extension_bars
+                and recovery_counter <= cfg.max_recovery_bars
+                and _passes_exhaust_filters(
+                    extension_bars,
+                    close_price,
+                    envelope,
+                    slope_map.get(envelope.timestamp),
+                    direction,
+                    cfg,
+                )
+            ):
                 events.append(
                     PatternEvent(
                         pattern_type=PatternType.EXHAUST,
-                        direction=exhaust_direction,
-                        start_timestamp=extension_sequence[0][0],
+                        direction=-direction,
+                        start_timestamp=extension_bars[0][0],
                         end_timestamp=envelope.timestamp,
-                        strength=len(extension_sequence),
+                        strength=len(extension_bars),
                     )
                 )
-            extension_sequence = []
-            direction = 0
+                extension_bars = []
+                direction = 0
+                recovery_counter = 0
+            elif recovery_counter > cfg.max_recovery_bars:
+                extension_bars = []
+                direction = 0
+                recovery_counter = 0
+        else:
+            extension_bars = []
+            recovery_counter = 0
 
     return events
 
 
-def detect_c_wave(envelopes: Sequence[EnvelopeSeries]) -> List[PatternEvent]:
+def _passes_exhaust_filters(
+    extension_bars: Sequence[tuple[datetime, Decimal, Decimal | None, EnvelopeSeries]],
+    reentry_close: Decimal,
+    reentry_envelope: EnvelopeSeries,
+    reentry_slope: Decimal | None,
+    direction: int,
+    config: ExhaustConfig,
+) -> bool:
+    if not extension_bars:
+        return False
+
+    width = float(reentry_envelope.width)
+    if width <= 0:
+        return False
+
+    closes = [float(close) for _, close, _, _ in extension_bars]
+    extreme = max(closes) if direction == 1 else min(closes)
+    reentry_close_f = float(reentry_close)
+    if direction == 1:
+        reversion = (extreme - reentry_close_f) / width
+    else:
+        reversion = (reentry_close_f - extreme) / width
+    if reversion < config.min_reversion_ratio:
+        return False
+
+    slope_limit = config.slope_reversal_limit
+    if slope_limit is not None:
+        last_slope = extension_bars[-1][2]
+        if last_slope is not None and float(last_slope) * direction <= slope_limit:
+            # Extension should show momentum in its direction
+            return False
+        if reentry_slope is not None and float(reentry_slope) * direction > slope_limit:
+            # Reentry slope must fade or reverse
+            return False
+
+    return True
+
+
+def detect_c_wave(
+    envelopes: Sequence[EnvelopeSeries],
+    config: CWaveConfig | None = None,
+    pldot: Sequence[PLDotSeries] | None = None,
+    intervals: Sequence[IntervalData] | None = None,
+) -> List[PatternEvent]:
+    cfg = config or CWaveConfig()
+
+    slope_map: dict[datetime, float] = {}
+    if pldot:
+        slope_map = {series.timestamp: float(series.slope) for series in pldot}
+
+    ordered_intervals: List[IntervalData] | None = None
+    volume_index: dict[datetime, int] | None = None
+    if intervals:
+        ordered_intervals = sorted(intervals, key=lambda bar: bar.timestamp)
+        volume_index = {bar.timestamp: idx for idx, bar in enumerate(ordered_intervals)}
+
     ordered = sorted(envelopes, key=lambda e: e.timestamp)
     events: List[PatternEvent] = []
     streak: List[EnvelopeSeries] = []
@@ -231,33 +323,99 @@ def detect_c_wave(envelopes: Sequence[EnvelopeSeries]) -> List[PatternEvent]:
 
     for entry in ordered:
         position = float(entry.position)
-        center = float(entry.center)
-        if position >= 0.9:
+        if position >= cfg.upper_position_threshold:
             curr_dir = 1
-        elif position <= 0.1:
+        elif position <= cfg.lower_position_threshold:
             curr_dir = -1
         else:
             curr_dir = 0
 
         if curr_dir != 0:
-            if direction == 0 or curr_dir == direction:
+            if direction in (0, curr_dir):
                 streak.append(entry)
                 direction = curr_dir
             else:
-                if len(streak) >= 3:
+                if _qualifies_c_wave(streak, direction, cfg, slope_map, ordered_intervals, volume_index):
                     events.append(_build_envelope_event(PatternType.C_WAVE, streak, direction))
                 streak = [entry]
                 direction = curr_dir
         else:
-            if len(streak) >= 3:
+            if _qualifies_c_wave(streak, direction, cfg, slope_map, ordered_intervals, volume_index):
                 events.append(_build_envelope_event(PatternType.C_WAVE, streak, direction))
             streak = []
             direction = 0
 
-    if len(streak) >= 3:
+    if _qualifies_c_wave(streak, direction, cfg, slope_map, ordered_intervals, volume_index):
         events.append(_build_envelope_event(PatternType.C_WAVE, streak, direction))
 
     return events
+
+
+def _qualifies_c_wave(
+    streak: Sequence[EnvelopeSeries],
+    direction: int,
+    config: CWaveConfig,
+    slope_map: dict[datetime, float],
+    ordered_intervals: Sequence[IntervalData] | None,
+    volume_index: dict[datetime, int] | None,
+) -> bool:
+    if not streak or direction == 0:
+        return False
+    if len(streak) < config.min_bars:
+        return False
+
+    slopes_required = config.min_slope > 0 or config.min_slope_acceleration > 0
+    if slopes_required and not slope_map:
+        return False
+
+    if slope_map:
+        slope_values = [slope_map.get(entry.timestamp) for entry in streak if entry.timestamp in slope_map]
+        if slopes_required and len(slope_values) < len(streak):
+            return False
+        if slope_values:
+            avg_slope = sum(slope_values) / len(slope_values)
+            if avg_slope * direction < config.min_slope:
+                return False
+            acceleration = (slope_values[-1] - slope_values[0]) * direction
+            if acceleration < config.min_slope_acceleration:
+                return False
+    elif slopes_required:
+        return False
+
+    widths = [float(entry.width) for entry in streak]
+    if not widths or widths[0] <= 0:
+        if config.min_envelope_expansion > 0:
+            return False
+        expansion_ratio = 0.0
+    else:
+        expansion_ratio = (widths[-1] - widths[0]) / widths[0]
+    if expansion_ratio < config.min_envelope_expansion:
+        return False
+
+    if config.require_volume_confirmation:
+        if ordered_intervals is None or volume_index is None:
+            return False
+        first_index = volume_index.get(streak[0].timestamp)
+        if first_index is None:
+            return False
+        lookback_start = max(0, first_index - config.volume_lookback)
+        pre_slice = ordered_intervals[lookback_start:first_index]
+        if not pre_slice:
+            return False
+        pre_avg = sum(int(bar.volume) for bar in pre_slice) / len(pre_slice)
+
+        streak_indices = [volume_index.get(entry.timestamp) for entry in streak]
+        if any(idx is None for idx in streak_indices):
+            return False
+        assert streak_indices  # for type checker
+        streak_volumes = [int(ordered_intervals[idx].volume) for idx in streak_indices if idx is not None]
+        if not streak_volumes:
+            return False
+        streak_avg = sum(streak_volumes) / len(streak_volumes)
+        if pre_avg > 0 and streak_avg < pre_avg * config.volume_multiplier:
+            return False
+
+    return True
 
 
 def detect_congestion_oscillation(envelopes: Sequence[EnvelopeSeries]) -> List[PatternEvent]:
@@ -333,6 +491,9 @@ def _sign(value: Decimal) -> int:
 __all__ = [
     "PatternType",
     "PatternEvent",
+    "PLDotRefreshConfig",
+    "ExhaustConfig",
+    "CWaveConfig",
     "detect_pldot_push",
     "detect_pldot_refresh",
     "detect_exhaust",

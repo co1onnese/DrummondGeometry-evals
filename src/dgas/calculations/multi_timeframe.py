@@ -13,12 +13,13 @@ Key concepts:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from .drummond_lines import DrummondZone
 from .envelopes import EnvelopeSeries
 from .pldot import PLDotSeries
 from .states import MarketState, StateSeries, TrendDirection
@@ -41,6 +42,7 @@ class TimeframeData:
     envelope_series: Sequence[EnvelopeSeries]
     state_series: Sequence[StateSeries]
     pattern_events: Sequence[PatternEvent]
+    drummond_zones: Sequence[DrummondZone] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,9 @@ class ConfluenceZone:
     zone_type: str  # "support", "resistance", "pivot"
     first_touch: datetime
     last_touch: datetime
+    weighted_strength: Decimal = Decimal("0")
+    sources: Dict[str, str] = field(default_factory=dict)
+    volatility: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -454,79 +459,207 @@ class MultiTimeframeCoordinator:
         Confluence zones are critical in Drummond Geometry - they represent
         levels where multiple timeframes agree on support/resistance.
         """
-        # Collect all significant levels from all timeframes
-        all_levels: List[Tuple[Decimal, str, datetime, str]] = []
+        tf_weight_map = {
+            TimeframeType.HIGHER: Decimal("1.5"),
+            TimeframeType.TRADING: Decimal("1.0"),
+            TimeframeType.LOWER: Decimal("0.75"),
+        }
+
+        base_relative_tolerance = Decimal(str(self.confluence_tolerance_pct / 100.0))
+        min_absolute_tolerance = Decimal("0.0001")
+
+        level_entries: List[Dict[str, object]] = []
+
+        def add_entry(
+            *,
+            price: Decimal,
+            zone_type: str,
+            timeframe_label: str,
+            classification: TimeframeType,
+            timestamp_value: datetime,
+            source: str,
+            base_weight: Decimal,
+            component_strength: Decimal,
+            volatility: Decimal,
+        ) -> None:
+            if not isinstance(price, Decimal):
+                price = Decimal(str(price))
+            if price.is_nan():
+                return
+            if not isinstance(volatility, Decimal):
+                volatility = Decimal(str(volatility))
+            if volatility.is_nan():
+                volatility = Decimal("0")
+            price_abs = abs(price)
+            relative_tol = price_abs * base_relative_tolerance
+            width_tol = volatility * Decimal("0.5")
+            tolerance = max(relative_tol, width_tol, min_absolute_tolerance)
+
+            level_entries.append(
+                {
+                    "price": price,
+                    "zone_type": zone_type,
+                    "timeframe": timeframe_label,
+                    "classification": classification,
+                    "timestamp": timestamp_value,
+                    "source": source,
+                    "weight": base_weight * component_strength,
+                    "component_strength": component_strength,
+                    "volatility": volatility,
+                    "tolerance": tolerance,
+                }
+            )
 
         for tf_data in all_timeframe_data:
-            if tf_data is None:
+            if not tf_data:
                 continue
 
-            # Get recent envelopes
+            timeframe_label = tf_data.timeframe or tf_data.classification.value
+            tf_weight = tf_weight_map.get(tf_data.classification, Decimal("1.0"))
+
             recent_envelopes = [
-                e for e in tf_data.envelope_series
-                if e.timestamp <= timestamp
-            ][-20:]  # Last 20 bars
+                env for env in tf_data.envelope_series if env.timestamp <= timestamp
+            ][-20:]
 
             for env in recent_envelopes:
-                # Upper band = resistance
-                all_levels.append((env.upper, tf_data.timeframe, env.timestamp, "resistance"))
-                # Lower band = support
-                all_levels.append((env.lower, tf_data.timeframe, env.timestamp, "support"))
-                # Center (PLdot) = pivot
-                all_levels.append((env.center, tf_data.timeframe, env.timestamp, "pivot"))
+                width = env.width if isinstance(env.width, Decimal) else Decimal(str(env.width))
+                if width.is_nan():
+                    width = Decimal("0")
+                vol_measure = width if width > 0 else Decimal("0.01")
+                add_entry(
+                    price=Decimal(env.upper),
+                    zone_type="resistance",
+                    timeframe_label=timeframe_label,
+                    classification=tf_data.classification,
+                    timestamp_value=env.timestamp,
+                    source="envelope_upper",
+                    base_weight=tf_weight,
+                    component_strength=Decimal("1.0"),
+                    volatility=vol_measure,
+                )
+                add_entry(
+                    price=Decimal(env.lower),
+                    zone_type="support",
+                    timeframe_label=timeframe_label,
+                    classification=tf_data.classification,
+                    timestamp_value=env.timestamp,
+                    source="envelope_lower",
+                    base_weight=tf_weight,
+                    component_strength=Decimal("1.0"),
+                    volatility=vol_measure,
+                )
+                add_entry(
+                    price=Decimal(env.center),
+                    zone_type="pivot",
+                    timeframe_label=timeframe_label,
+                    classification=tf_data.classification,
+                    timestamp_value=env.timestamp,
+                    source="pldot_center",
+                    base_weight=tf_weight,
+                    component_strength=Decimal("0.5"),
+                    volatility=vol_measure,
+                )
 
-        # Group levels within tolerance
-        tolerance = Decimal(str(self.confluence_tolerance_pct / 100.0))
+            for zone in getattr(tf_data, "drummond_zones", []) or []:
+                width = Decimal(zone.upper_price) - Decimal(zone.lower_price)
+                width = abs(width)
+                vol_measure = width if width > 0 else Decimal("0.01")
+                add_entry(
+                    price=Decimal(zone.center_price),
+                    zone_type=zone.line_type,
+                    timeframe_label=timeframe_label,
+                    classification=tf_data.classification,
+                    timestamp_value=timestamp,
+                    source="drummond_zone",
+                    base_weight=tf_weight,
+                    component_strength=Decimal(zone.strength),
+                    volatility=vol_measure,
+                )
+
         zones: List[ConfluenceZone] = []
-        used_levels = set()
+        used_indices: set[int] = set()
 
-        for i, (level, tf, ts, zone_type) in enumerate(all_levels):
-            if i in used_levels:
+        precision = Decimal("0.000001")
+
+        for idx, entry in enumerate(level_entries):
+            if idx in used_indices:
                 continue
 
-            # Find all levels within tolerance
-            cluster = [(level, tf, ts, zone_type)]
-            cluster_indices = {i}
+            cluster = [entry]
+            cluster_indices = {idx}
 
-            for j, (other_level, other_tf, other_ts, other_type) in enumerate(all_levels):
-                if j <= i or j in used_levels:
+            for jdx, candidate in enumerate(level_entries):
+                if jdx <= idx or jdx in used_indices:
+                    continue
+                if candidate["zone_type"] != entry["zone_type"]:
                     continue
 
-                # Check if within tolerance and same zone type
-                price_diff = abs(other_level - level)
-                relative_diff = price_diff / level if level != 0 else Decimal("0.0")
+                price_diff = abs(Decimal(candidate["price"]) - Decimal(entry["price"]))
+                tolerance = max(
+                    Decimal(entry["tolerance"]),
+                    Decimal(candidate["tolerance"]),
+                )
+                if price_diff <= tolerance:
+                    cluster.append(candidate)
+                    cluster_indices.add(jdx)
 
-                if relative_diff <= tolerance and other_type == zone_type:
-                    cluster.append((other_level, other_tf, other_ts, other_type))
-                    cluster_indices.add(j)
+            unique_timeframes = {str(item["timeframe"]) for item in cluster}
+            if len(unique_timeframes) < 2:
+                continue
 
-            # Only create zone if confirmed by multiple timeframes
-            unique_timeframes = {tf for _, tf, _, _ in cluster}
-            if len(unique_timeframes) >= 2:
-                used_levels.update(cluster_indices)
+            used_indices.update(cluster_indices)
 
-                # Calculate zone bounds
-                levels_only = [lv for lv, _, _, _ in cluster]
-                center = sum(levels_only) / len(levels_only)
-                upper = max(levels_only)
-                lower = min(levels_only)
+            def _to_decimal(value: object) -> Decimal:
+                if isinstance(value, Decimal):
+                    return value
+                return Decimal(str(value))
 
-                timeframes_list = sorted(unique_timeframes)
-                timestamps = [ts for _, _, ts, _ in cluster]
+            levels = [_to_decimal(item["price"]) for item in cluster]
+            center = sum(levels, Decimal("0")) / Decimal(len(levels))
+            upper = max(levels)
+            lower = min(levels)
+            timestamps = [item["timestamp"] for item in cluster]
 
-                zones.append(ConfluenceZone(
-                    level=center,
-                    upper_bound=upper,
-                    lower_bound=lower,
+            aggregate_sources: Dict[str, Tuple[str, Decimal]] = {}
+            total_weight = Decimal("0")
+            total_volatility = Decimal("0")
+
+            for item in cluster:
+                tf_label = str(item["timeframe"])
+                source = str(item["source"])
+                weight = Decimal(item["weight"])
+                total_weight += weight
+                total_volatility += _to_decimal(item["volatility"])
+
+                existing = aggregate_sources.get(tf_label)
+                if existing is None or weight > existing[1]:
+                    aggregate_sources[tf_label] = (source, weight)
+
+            avg_volatility = (
+                total_volatility / Decimal(len(cluster)) if cluster else Decimal("0")
+            )
+
+            zones.append(
+                ConfluenceZone(
+                    level=center.quantize(precision),
+                    upper_bound=upper.quantize(precision),
+                    lower_bound=lower.quantize(precision),
                     strength=len(unique_timeframes),
-                    timeframes=timeframes_list,
-                    zone_type=zone_type,
+                    timeframes=sorted(unique_timeframes),
+                    zone_type=str(entry["zone_type"]),
                     first_touch=min(timestamps),
                     last_touch=max(timestamps),
-                ))
+                    weighted_strength=total_weight.quantize(precision),
+                    sources={tf: src for tf, (src, _) in aggregate_sources.items()},
+                    volatility=avg_volatility.quantize(precision),
+                )
+            )
 
-        # Sort by strength (most confirmed zones first)
-        return sorted(zones, key=lambda z: z.strength, reverse=True)
+        return sorted(
+            zones,
+            key=lambda z: (z.strength, z.weighted_strength),
+            reverse=True,
+        )
 
     def _get_recent_patterns(
         self,
@@ -601,10 +734,13 @@ class MultiTimeframeCoordinator:
         if zones:
             # Boost if price is near a strong confluence zone
             strongest_zone = zones[0]
-            if strongest_zone.strength >= 3:
+            zone_weight = strongest_zone.weighted_strength
+            if zone_weight >= Decimal("4.0"):
                 score += Decimal("0.15")
+            elif zone_weight >= Decimal("2.5"):
+                score += Decimal("0.12")
             elif strongest_zone.strength >= 2:
-                score += Decimal("0.10")
+                score += Decimal("0.08")
 
         # Pattern confluence contribution
         if pattern_confluence:

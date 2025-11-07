@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Mapping, MutableMapping, Sequence
+from typing import Any, Dict, Mapping, MutableMapping, Optional, Sequence
 
 from psycopg import Connection
 
 from ..data.models import IntervalData
 from ..data.repository import fetch_market_data
 from ..db import get_connection
+from ..calculations import build_timeframe_data, MultiTimeframeCoordinator, TimeframeType
+from ..calculations.multi_timeframe import MultiTimeframeAnalysis
 
 
 @dataclass(frozen=True)
@@ -88,17 +90,86 @@ def load_dataset(
     include_indicators: bool = True,
     limit: int | None = None,
     conn: Connection | None = None,
+    htf_interval: str | None = None,
 ) -> BacktestDataset:
     """Load a full dataset ready for simulation."""
 
     bars = load_ohlcv(symbol, interval, start=start, end=end, limit=limit, conn=conn)
-    indicator_map = (
-        load_indicator_snapshots(symbol, interval, start=start, end=end, conn=conn)
-        if include_indicators
-        else {}
-    )
+    indicator_map: Mapping[datetime, Mapping[str, Any]] = {}
+    if include_indicators and htf_interval:
+        indicator_map = _build_multi_timeframe_snapshots(
+            symbol,
+            interval,
+            bars,
+            htf_interval,
+            start=start,
+            end=end,
+            conn=conn,
+        )
     assembled = assemble_bars(bars, indicator_map)
     return BacktestDataset(symbol=symbol, interval=interval, bars=assembled)
+
+
+def _build_multi_timeframe_snapshots(
+    symbol: str,
+    trading_interval: str,
+    trading_bars: Sequence[IntervalData],
+    htf_interval: str,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    conn: Connection | None = None,
+) -> Dict[datetime, Mapping[str, Any]]:
+    if not trading_bars:
+        return {}
+
+    htf_bars = load_ohlcv(symbol, htf_interval, start=start, end=end, conn=conn)
+    if not htf_bars:
+        return {}
+
+    coordinator = MultiTimeframeCoordinator(htf_interval, trading_interval)
+    indicator_map: Dict[datetime, Mapping[str, Any]] = {}
+
+    trading_sorted = sorted(trading_bars, key=lambda bar: bar.timestamp)
+    htf_sorted = sorted(htf_bars, key=lambda bar: bar.timestamp)
+
+    accumulated_trading: list[IntervalData] = []
+    accumulated_htf: list[IntervalData] = []
+    htf_index = 0
+
+    for bar in trading_sorted:
+        accumulated_trading.append(bar)
+
+        while htf_index < len(htf_sorted) and htf_sorted[htf_index].timestamp <= bar.timestamp:
+            accumulated_htf.append(htf_sorted[htf_index])
+            htf_index += 1
+
+        if len(accumulated_trading) < 3 or len(accumulated_htf) < 3:
+            continue
+
+        trading_data = build_timeframe_data(
+            accumulated_trading,
+            trading_interval,
+            TimeframeType.TRADING,
+        )
+        htf_data = build_timeframe_data(
+            accumulated_htf,
+            htf_interval,
+            TimeframeType.HIGHER,
+        )
+
+        try:
+            analysis: MultiTimeframeAnalysis = coordinator.analyze(
+                htf_data,
+                trading_data,
+                target_timestamp=bar.timestamp,
+            )
+        except ValueError:
+            continue
+
+        indicator_map[bar.timestamp] = {"analysis": analysis}
+
+    return indicator_map
 
 
 __all__ = [

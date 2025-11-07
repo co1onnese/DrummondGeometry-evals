@@ -35,6 +35,7 @@ class BacktestRequest:
     persist_results: bool = True
     limit: int | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    htf_interval: str | None = None
 
 
 @dataclass(frozen=True)
@@ -68,11 +69,13 @@ class BacktestRunner:
                 start=request.start,
                 end=request.end,
                 limit=request.limit,
+                htf_interval=request.htf_interval,
             )
 
             if not dataset.bars:
                 raise ValueError(f"No market data found for {symbol} on interval {request.interval}")
 
+            # CRITICAL FIX: Create fresh strategy instance per symbol to avoid state accumulation
             strategy = instantiate_strategy(
                 request.strategy_name,
                 request.strategy_params,

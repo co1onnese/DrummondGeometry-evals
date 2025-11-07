@@ -13,19 +13,10 @@ from rich.table import Table
 from rich.text import Text
 
 from ..calculations import (
-    EnvelopeCalculator,
-    MarketStateClassifier,
     MultiTimeframeCoordinator,
-    PLDotCalculator,
     TimeframeData,
     TimeframeType,
-)
-from ..calculations.patterns import (
-    detect_c_wave,
-    detect_congestion_oscillation,
-    detect_exhaust,
-    detect_pldot_push,
-    detect_pldot_refresh,
+    build_timeframe_data,
 )
 from ..data.models import IntervalData
 from ..db import get_connection
@@ -76,7 +67,10 @@ def load_market_data(
             timestamp, open_p, high_p, low_p, close_p, volume = row
             intervals.append(
                 IntervalData(
+                    symbol=symbol,
+                    exchange=None,  # Will be added by fetch_market_data if needed
                     timestamp=timestamp,
+                    interval=interval,
                     open=Decimal(str(open_p)),
                     high=Decimal(str(high_p)),
                     low=Decimal(str(low_p)),
@@ -91,38 +85,7 @@ def load_market_data(
 
 def calculate_indicators(intervals: list[IntervalData]) -> TimeframeData:
     """Calculate all Drummond indicators for a single timeframe."""
-    # PLdot calculation
-    pldot_calc = PLDotCalculator(displacement=1)
-    pldot_series = pldot_calc.from_intervals(intervals)
-
-    # Envelope calculation (using correct Drummond method)
-    envelope_calc = EnvelopeCalculator(
-        method="pldot_range",
-        period=3,
-        multiplier=1.5
-    )
-    envelope_series = envelope_calc.from_intervals(intervals, pldot_series)
-
-    # Market state classification
-    state_classifier = MarketStateClassifier(slope_threshold=0.0001)
-    state_series = state_classifier.classify(intervals, pldot_series)
-
-    # Pattern detection
-    patterns = []
-    patterns.extend(detect_pldot_push(intervals, pldot_series))
-    patterns.extend(detect_pldot_refresh(intervals, pldot_series))
-    patterns.extend(detect_exhaust(intervals, pldot_series, envelope_series))
-    patterns.extend(detect_c_wave(envelope_series))
-    patterns.extend(detect_congestion_oscillation(envelope_series))
-
-    return TimeframeData(
-        timeframe="",  # Will be set by caller
-        classification=TimeframeType.TRADING,  # Will be set by caller
-        pldot_series=pldot_series,
-        envelope_series=envelope_series,
-        state_series=state_series,
-        pattern_events=patterns,
-    )
+    return build_timeframe_data(intervals, timeframe="", classification=TimeframeType.TRADING)
 
 
 def display_single_timeframe_analysis(
@@ -388,24 +351,26 @@ def run_analyze_command(
                 # Calculate indicators for both timeframes
                 console.print(f"[dim]Calculating indicators...[/dim]")
 
-                htf_data = calculate_indicators(htf_intervals)
+                htf_base = calculate_indicators(htf_intervals)
                 htf_data = TimeframeData(
                     timeframe=htf_interval,
                     classification=TimeframeType.HIGHER,
-                    pldot_series=htf_data.pldot_series,
-                    envelope_series=htf_data.envelope_series,
-                    state_series=htf_data.state_series,
-                    pattern_events=htf_data.pattern_events,
+                    pldot_series=htf_base.pldot_series,
+                    envelope_series=htf_base.envelope_series,
+                    state_series=htf_base.state_series,
+                    pattern_events=htf_base.pattern_events,
+                    drummond_zones=htf_base.drummond_zones,
                 )
 
-                trading_data = calculate_indicators(trading_intervals)
+                trading_base = calculate_indicators(trading_intervals)
                 trading_data = TimeframeData(
                     timeframe=trading_interval,
                     classification=TimeframeType.TRADING,
-                    pldot_series=trading_data.pldot_series,
-                    envelope_series=trading_data.envelope_series,
-                    state_series=trading_data.state_series,
-                    pattern_events=trading_data.pattern_events,
+                    pldot_series=trading_base.pldot_series,
+                    envelope_series=trading_base.envelope_series,
+                    state_series=trading_base.state_series,
+                    pattern_events=trading_base.pattern_events,
+                    drummond_zones=trading_base.drummond_zones,
                 )
 
                 # Display single timeframe analysis if in detailed mode

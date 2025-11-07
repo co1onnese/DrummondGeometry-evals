@@ -61,7 +61,6 @@ def persist_backtest(
                     avg_win,
                     avg_loss,
                     profit_factor,
-                    net_profit,
                     test_config,
                     completed_at
                 ) VALUES (
@@ -90,7 +89,6 @@ def persist_backtest(
                     performance.avg_win,
                     performance.avg_loss,
                     performance.profit_factor,
-                    performance.net_profit,
                     Json(_build_test_config(result, metadata)),
                     datetime.now(timezone.utc),
                 ),
@@ -109,9 +107,13 @@ def persist_backtest(
 
 def _build_test_config(result: BacktestResult, metadata: Mapping[str, Any] | None) -> Mapping[str, Any]:
     base = asdict(result.config)
+    # Convert Decimal values to float for JSON serialization
+    base = {k: (float(v) if isinstance(v, Decimal) else v) for k, v in base.items()}
     base.update(result.metadata)
     if metadata:
-        base.update(metadata)
+        # Also convert any Decimal values in metadata
+        metadata_clean = {k: (float(v) if isinstance(v, Decimal) else v) for k, v in metadata.items()}
+        base.update(metadata_clean)
     return base
 
 

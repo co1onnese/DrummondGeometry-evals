@@ -288,6 +288,7 @@ class PredictionScheduler:
         persistence: PredictionPersistence,
         market_hours: Optional[MarketHoursManager] = None,
         settings: Optional[Settings] = None,
+        performance_tracker: Optional[Any] = None,  # PerformanceTracker (avoid circular import)
     ):
         """
         Initialize scheduler.
@@ -298,6 +299,7 @@ class PredictionScheduler:
             persistence: Database persistence layer
             market_hours: Market hours manager (created from config if None)
             settings: Settings instance (uses get_settings() if None)
+            performance_tracker: Performance tracker for metrics (created if None)
         """
         self.config = config
         self.engine = engine
@@ -311,6 +313,12 @@ class PredictionScheduler:
                 config.trading_session,
             )
         self.market_hours = market_hours
+
+        # Performance tracker (Week 5 addition)
+        if performance_tracker is None:
+            from .monitoring import PerformanceTracker
+            performance_tracker = PerformanceTracker(persistence)
+        self.performance_tracker = performance_tracker
 
         # APScheduler instance
         self.scheduler = BackgroundScheduler(timezone=config.trading_session.timezone)
@@ -631,6 +639,35 @@ class PredictionScheduler:
 
                     # Update result with persisted run_id
                     result = replace(result, run_id=run_id)
+
+                    # Track performance metrics (Week 5 addition)
+                    if self.performance_tracker and run_id:
+                        try:
+                            from .monitoring import LatencyMetrics, ThroughputMetrics
+
+                            latency = LatencyMetrics(
+                                data_fetch_ms=result.data_fetch_ms,
+                                indicator_calc_ms=result.indicator_calc_ms,
+                                signal_generation_ms=result.signal_generation_ms,
+                                notification_ms=notification_ms,
+                                total_ms=result.execution_time_ms + notification_ms,
+                            )
+
+                            throughput = ThroughputMetrics.calculate(
+                                symbols_processed=result.symbols_processed,
+                                signals_generated=result.signals_generated,
+                                execution_time_ms=result.execution_time_ms + notification_ms,
+                            )
+
+                            self.performance_tracker.track_cycle(
+                                run_id=run_id,
+                                latency=latency,
+                                throughput=throughput,
+                                errors=result.errors + notification_errors,
+                            )
+
+                        except Exception as e:
+                            logger.error(f"Performance tracking failed: {e}", exc_info=True)
 
                 except Exception as e:
                     logger.error(f"Persistence failed: {e}", exc_info=True)
