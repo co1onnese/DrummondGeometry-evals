@@ -121,6 +121,10 @@ class PortfolioBacktestEngine:
         self.equity_curve: List[PortfolioSnapshot] = []
         self.history_by_symbol: Dict[str, any] = {}
         
+        # Performance optimization: Limit history size to avoid recalculating everything
+        # Only keep recent bars needed for indicator calculation (200 bars ≈ 100 hours at 30m)
+        self.max_history_bars = 200
+        
         # Signal evaluation tracking
         self.signal_evaluator = SignalEvaluator()
 
@@ -194,7 +198,7 @@ class PortfolioBacktestEngine:
             # Show progress
             if idx % progress_interval == 0 or idx == len(timeline) - 1:
                 progress_pct = (idx + 1) / len(timeline) * 100
-                print(f"Progress: {progress_pct:.1f}% ({idx+1:,}/{len(timeline):,} timesteps)", end="\r")
+                print(f"Progress: {progress_pct:.1f}% ({idx+1:,}/{len(timeline):,} timesteps)", end="\r", flush=True)
 
             # Process this timestep
             self._process_timestep(timestep, idx, len(timeline))
@@ -333,6 +337,14 @@ class PortfolioBacktestEngine:
             # Update history
             history = self.history_by_symbol[symbol]
             history.append(bar)
+            
+            # Limit history size for performance - only keep recent bars
+            # This prevents recalculating indicators on ever-growing history
+            if len(history) > self.max_history_bars:
+                # Remove oldest bars, keeping only the most recent
+                excess = len(history) - self.max_history_bars
+                for _ in range(excess):
+                    history.popleft()
 
             if len(history) < self.strategy.config.min_history:
                 continue
@@ -356,9 +368,12 @@ class PortfolioBacktestEngine:
                 return (symbol, None, str(e))
 
         # Calculate optimal worker count based on CPU cores and symbol count
+        # Use all available CPUs for maximum parallelization
         cpu_count = os.cpu_count() or 4
         symbol_count = len(eligible_symbols)
-        optimal_workers = min(cpu_count, max(symbol_count, 1), 8)  # Cap at 8, ensure at least 1
+        # Use all CPUs, but don't exceed symbol count (no point in more workers than symbols)
+        # Remove the cap of 8 to use all available CPUs
+        optimal_workers = min(cpu_count, symbol_count) if symbol_count > 0 else 1
 
         # Use ThreadPoolExecutor for parallel indicator calculation
         with ThreadPoolExecutor(max_workers=optimal_workers) as executor:
@@ -373,6 +388,11 @@ class PortfolioBacktestEngine:
                 symbol, indicators, error = future.result()
                 if indicators is not None:
                     indicator_results[symbol] = indicators
+
+        # Get current prices for position sizing
+        current_prices = {
+            symbol: bar.close for symbol, bar in timestep.bars.items()
+        }
 
         # Phase 3: Generate signals from calculated indicators (sequential)
         for symbol, bar, history in eligible_symbols:
@@ -417,8 +437,8 @@ class PortfolioBacktestEngine:
                     signal_id = metadata.get("signal_id")
                     if signal_id:
                         # Reconstruct GeneratedSignal from metadata for evaluation
-                        from ...prediction.engine import GeneratedSignal, SignalType
-                        from ...calculations.states import TrendDirection
+                        from dgas.prediction.engine import GeneratedSignal, SignalType
+                        from dgas.calculations.states import TrendDirection
                         
                         try:
                             signal_type_str = "LONG" if signal.action == SignalAction.ENTER_LONG else "SHORT"

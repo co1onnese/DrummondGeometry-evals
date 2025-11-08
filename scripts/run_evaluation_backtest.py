@@ -92,10 +92,13 @@ def verify_data_availability(
     symbols_with_data = []
     symbols_missing_data = []
 
-    print("\nVerifying data availability...")
+    print("\nVerifying data availability...", flush=True)
+    print(f"  Checking {len(symbols)} symbols...", flush=True)
 
     with get_connection() as conn:
-        for symbol in symbols:
+        for idx, symbol in enumerate(symbols):
+            if idx % 10 == 0:
+                print(f"  Progress: {idx}/{len(symbols)} symbols checked...", end="\r", flush=True)
             try:
                 bars = fetch_market_data(conn, symbol, interval, start=start, end=end)
 
@@ -104,12 +107,13 @@ def verify_data_availability(
                 else:
                     symbols_missing_data.append(symbol)
 
-            except Exception:
+            except Exception as e:
+                print(f"\n  ⚠ Error checking {symbol}: {e}", flush=True)
                 symbols_missing_data.append(symbol)
 
-    print(f"  ✓ {len(symbols_with_data)} symbols have data")
+    print(f"\n  ✓ {len(symbols_with_data)} symbols have data", flush=True)
     if symbols_missing_data:
-        print(f"  ✗ {len(symbols_missing_data)} symbols missing data")
+        print(f"  ✗ {len(symbols_missing_data)} symbols missing data", flush=True)
 
     return symbols_with_data, symbols_missing_data
 
@@ -217,7 +221,8 @@ def main() -> int:
     print(f"{'='*80}\n")
 
     # Configuration - EXACT PARAMETERS AS SPECIFIED
-    START_DATE = datetime(2025, 9, 7, tzinfo=timezone.utc)  # 3 months minus 1 day from end
+    # Note: Sept 7, 2025 is a Sunday (no trading), so start on Sept 8 (Monday)
+    START_DATE = datetime(2025, 9, 8, tzinfo=timezone.utc)  # First trading day after Sept 7
     END_DATE = datetime(2025, 11, 7, tzinfo=timezone.utc)
     INTERVAL = "30m"
     INITIAL_CAPITAL = Decimal("100000")  # $100k total
@@ -295,10 +300,10 @@ def main() -> int:
         strategy=strategy,
     )
 
-    print("Starting evaluation backtest...\n")
-    print("⚠ This will take 8-15 hours to complete.")
-    print("   The system will process all symbols at each timestamp.")
-    print("   Progress updates will be shown every 5% of timesteps.\n")
+    print("Starting evaluation backtest...\n", flush=True)
+    print("⚠ This will take 8-15 hours to complete.", flush=True)
+    print("   The system will process all symbols at each timestamp.", flush=True)
+    print("   Progress updates will be shown every 5% of timesteps.\n", flush=True)
 
     try:
         result = engine.run(
@@ -330,4 +335,17 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Ensure unbuffered output
+    import os
+    os.environ['PYTHONUNBUFFERED'] = '1'
+    
+    # Wrap main in try/except to catch any import errors
+    try:
+        exit_code = main()
+        sys.exit(exit_code)
+    except Exception as e:
+        print(f"FATAL ERROR: {e}", file=sys.stderr, flush=True)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        sys.exit(1)

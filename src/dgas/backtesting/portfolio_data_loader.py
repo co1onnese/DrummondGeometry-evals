@@ -145,14 +145,25 @@ class PortfolioDataLoader:
                 params: list[object] = [list(symbols), interval]
 
                 if start is not None:
-                    # Convert UTC start time to Europe/Prague for query
-                    base_query.append("AND md.timestamp >= (%s AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Prague')")
-                    params.append(start)
+                    # Convert UTC datetime to Europe/Prague timezone for comparison
+                    # Timestamps in DB are stored as timestamp with time zone
+                    from zoneinfo import ZoneInfo
+                    prague_tz = ZoneInfo("Europe/Prague")
+                    if start.tzinfo is None:
+                        start = start.replace(tzinfo=ZoneInfo("UTC"))
+                    start_prague = start.astimezone(prague_tz)
+                    base_query.append("AND md.timestamp >= %s")
+                    params.append(start_prague)
 
                 if end is not None:
-                    # Convert UTC end time to Europe/Prague for query
-                    base_query.append("AND md.timestamp <= (%s AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Prague')")
-                    params.append(end)
+                    # Convert UTC datetime to Europe/Prague timezone for comparison
+                    from zoneinfo import ZoneInfo
+                    prague_tz = ZoneInfo("Europe/Prague")
+                    if end.tzinfo is None:
+                        end = end.replace(tzinfo=ZoneInfo("UTC"))
+                    end_prague = end.astimezone(prague_tz)
+                    base_query.append("AND md.timestamp <= %s")
+                    params.append(end_prague)
 
                 base_query.append("ORDER BY s.symbol, md.timestamp ASC")
 

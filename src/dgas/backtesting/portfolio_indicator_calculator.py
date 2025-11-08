@@ -112,15 +112,22 @@ class PortfolioIndicatorCalculator:
         if len(htf_bars_up_to_now) < 3:
             raise ValueError(f"Insufficient HTF bars: {len(htf_bars_up_to_now)} < 3")
 
+        # Performance optimization: Limit bars used for calculation
+        # Most indicators only need recent data (e.g., PLdot uses 3-period window)
+        # Limiting to last 200 bars significantly speeds up calculation
+        max_bars_for_calc = 200
+        trading_bars_for_calc = list(historical_bars[-max_bars_for_calc:]) if len(historical_bars) > max_bars_for_calc else list(historical_bars)
+        htf_bars_for_calc = htf_bars_up_to_now[-max_bars_for_calc:] if len(htf_bars_up_to_now) > max_bars_for_calc else htf_bars_up_to_now
+
         # Build timeframe data
         trading_data = build_timeframe_data(
-            list(historical_bars),
+            trading_bars_for_calc,
             self.trading_interval,
             TimeframeType.TRADING,
         )
 
         htf_data = build_timeframe_data(
-            htf_bars_up_to_now,
+            htf_bars_for_calc,
             self.htf_interval,
             TimeframeType.HIGHER,
         )

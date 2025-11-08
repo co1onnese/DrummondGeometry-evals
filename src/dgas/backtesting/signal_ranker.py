@@ -160,7 +160,10 @@ class SignalRanker:
         scores = {}
 
         # Signal strength (from analysis)
+        # Metadata stores values as strings, so convert if needed
         signal_strength = signal.metadata.get("signal_strength", 0.5)
+        if isinstance(signal_strength, str):
+            signal_strength = float(signal_strength) if signal_strength else 0.5
         scores[RankingCriteria.SIGNAL_STRENGTH] = Decimal(str(signal_strength)) * Decimal("100")
 
         # Risk/reward ratio
@@ -172,16 +175,27 @@ class SignalRanker:
             scores[RankingCriteria.RISK_REWARD_RATIO] = Decimal("0")
 
         # Confluence (number of confluence zones)
+        # Metadata stores values as strings, so convert if needed
         confluence_count = signal.metadata.get("confluence_zones_count", 0)
+        if isinstance(confluence_count, str):
+            confluence_count = int(confluence_count) if confluence_count else 0
+        elif not isinstance(confluence_count, (int, float)):
+            confluence_count = 0
         # Normalize to 0-100 (cap at 5 zones)
         scores[RankingCriteria.CONFLUENCE] = Decimal(str(min(confluence_count / 5, 1))) * Decimal("100")
 
         # Trend alignment
+        # Metadata stores values as strings, so convert if needed
         alignment_score = signal.metadata.get("alignment_score", 0.5)
+        if isinstance(alignment_score, str):
+            alignment_score = float(alignment_score) if alignment_score else 0.5
         scores[RankingCriteria.TREND_ALIGNMENT] = Decimal(str(alignment_score)) * Decimal("100")
 
         # Volatility (inverse - prefer lower volatility)
+        # Metadata stores values as strings, so convert if needed
         volatility = signal.metadata.get("volatility", 0.02)
+        if isinstance(volatility, str):
+            volatility = float(volatility) if volatility else 0.02
         # Lower volatility = higher score
         volatility_score = max(Decimal("0"), Decimal("1") - (Decimal(str(volatility)) * Decimal("50")))
         scores[RankingCriteria.VOLATILITY] = volatility_score * Decimal("100")
