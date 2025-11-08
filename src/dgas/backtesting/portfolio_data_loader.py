@@ -115,8 +115,14 @@ class PortfolioDataLoader:
         large portfolios (50-100× faster for 100 symbols).
         """
         from decimal import Decimal
+        from ..data.exchange_calendar import ExchangeCalendar
 
         bundles: dict[str, SymbolDataBundle] = {}
+
+        # Pre-load trading calendar if filtering is needed (cache by date)
+        calendar = None
+        if self.regular_hours_only:
+            calendar = ExchangeCalendar()
 
         with get_connection() as conn:
             with conn.cursor() as cur:
@@ -187,16 +193,19 @@ class PortfolioDataLoader:
                     )
 
                 # Create bundles and filter to regular hours if requested
-                for symbol, bars in bars_by_symbol.items():
+                for symbol, raw_bars in bars_by_symbol.items():
                     # Filter to regular hours if requested
                     if self.regular_hours_only:
-                        bars = filter_to_regular_hours(bars, self.exchange_code)
+                        filtered_bars = filter_to_regular_hours(raw_bars, self.exchange_code, calendar)
+                        print(f"DEBUG: {symbol}: {len(raw_bars)} bars -> {len(filtered_bars)} after filtering")
+                    else:
+                        filtered_bars = raw_bars
 
-                    if bars:  # Only create bundle if bars remain after filtering
+                    if filtered_bars:  # Only create bundle if bars remain after filtering
                         bundles[symbol] = SymbolDataBundle(
                             symbol=symbol,
-                            bars=list(bars),
-                            bar_count=len(bars),
+                            bars=list(filtered_bars),
+                            bar_count=len(filtered_bars),
                         )
 
         return bundles

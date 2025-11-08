@@ -172,11 +172,11 @@ def load_indicators_batch(
             return result
 
         with conn.cursor() as cursor:
-            # Query all timestamps at once
+            # Query all timestamps at once, including analysis_id for batch zone loading
             cursor.execute(
                 """
                 SELECT
-                    timestamp, htf_interval, trading_interval, ltf_interval,
+                    analysis_id, timestamp, htf_interval, trading_interval, ltf_interval,
                     htf_trend, htf_trend_strength, trading_tf_trend,
                     alignment_score, alignment_type, trade_permitted,
                     htf_pldot_value, trading_pldot_value, pldot_distance_percent,
@@ -194,17 +194,19 @@ def load_indicators_batch(
 
             rows = cursor.fetchall()
 
-            # Load confluence zones for all timestamps
-            analysis_ids_by_timestamp = {}
-            for row in rows:
-                timestamp = row[0]
-                # We need analysis_id to load zones, but we don't have it in the query
-                # So we'll load zones separately per timestamp
-                analysis_ids_by_timestamp[timestamp] = None
+            if not rows:
+                return result
+
+            # Extract analysis_ids for batch zone loading
+            analysis_ids = [row[0] for row in rows]
+
+            # Batch load all confluence zones for all analysis_ids in a single query
+            zones_by_analysis_id = _load_confluence_zones_batch(cursor, analysis_ids)
 
             # Reconstruct analyses
             for row in rows:
                 (
+                    analysis_id,
                     db_timestamp,
                     db_htf_interval,
                     db_trading_interval,
@@ -225,10 +227,8 @@ def load_indicators_batch(
                     confluence_zones_count,
                 ) = row
 
-                # Load confluence zones for this timestamp
-                confluence_zones = _load_confluence_zones(
-                    cursor, symbol_id, db_timestamp, db_htf_interval, db_trading_interval
-                )
+                # Get confluence zones from batch-loaded cache
+                confluence_zones = zones_by_analysis_id.get(analysis_id, [])
 
                 analysis = _reconstruct_analysis(
                     timestamp=db_timestamp,
@@ -259,6 +259,84 @@ def load_indicators_batch(
     return result
 
 
+def _load_confluence_zones_batch(
+    cursor,
+    analysis_ids: list[int],
+) -> Dict[int, list[ConfluenceZone]]:
+    """Batch load confluence zones for multiple analysis_ids in a single query.
+
+    Args:
+        cursor: Database cursor
+        analysis_ids: List of analysis_ids to load zones for
+
+    Returns:
+        Dictionary mapping analysis_id -> list of ConfluenceZone
+    """
+    if not analysis_ids:
+        return {}
+
+    zones_by_analysis_id: Dict[int, list[ConfluenceZone]] = {}
+
+    try:
+        # Load all zones for all analysis_ids in a single query
+        cursor.execute(
+            """
+            SELECT
+                analysis_id,
+                cz.level, cz.upper_bound, cz.lower_bound, cz.strength,
+                cz.timeframes, cz.zone_type, cz.first_touch, cz.last_touch
+            FROM confluence_zones cz
+            WHERE cz.analysis_id = ANY(%s)
+            ORDER BY cz.analysis_id, cz.level
+            """,
+            (analysis_ids,),
+        )
+
+        for zone_row in cursor.fetchall():
+            (
+                analysis_id,
+                level,
+                upper_bound,
+                lower_bound,
+                strength,
+                timeframes,
+                zone_type,
+                first_touch,
+                last_touch,
+            ) = zone_row
+
+            # timeframes might be stored as array or string
+            if isinstance(timeframes, list):
+                tf_list = timeframes
+            elif isinstance(timeframes, str):
+                tf_list = [t.strip() for t in timeframes.split(",")]
+            else:
+                tf_list = []
+
+            zone = ConfluenceZone(
+                level=Decimal(str(level)),
+                upper_bound=Decimal(str(upper_bound)),
+                lower_bound=Decimal(str(lower_bound)),
+                strength=int(strength),
+                timeframes=tf_list,
+                zone_type=zone_type,
+                first_touch=first_touch,
+                last_touch=last_touch,
+                weighted_strength=Decimal(str(strength)),  # Use strength as default
+                sources={},
+                volatility=Decimal("0"),  # Not stored in DB
+            )
+
+            if analysis_id not in zones_by_analysis_id:
+                zones_by_analysis_id[analysis_id] = []
+            zones_by_analysis_id[analysis_id].append(zone)
+
+    except Exception as e:
+        logger.debug(f"Failed to batch load confluence zones: {e}")
+
+    return zones_by_analysis_id
+
+
 def _load_confluence_zones(
     cursor,
     symbol_id: int,
@@ -269,6 +347,7 @@ def _load_confluence_zones(
     """Load confluence zones for a specific analysis timestamp.
 
     Uses a join to efficiently load zones without a separate query.
+    This is kept for backward compatibility with single-timestamp loading.
     """
     try:
         # Load zones using join with analysis table

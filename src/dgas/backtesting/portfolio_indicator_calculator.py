@@ -6,6 +6,7 @@ without requiring pre-computed database storage.
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Sequence
@@ -140,6 +141,8 @@ class PortfolioIndicatorCalculator:
     ) -> List[IntervalData]:
         """Get HTF bars up to (and including) timestamp.
 
+        Uses binary search for O(log n) lookup instead of linear scan.
+
         Args:
             symbol: Symbol to get HTF bars for
             timestamp: Cut-off timestamp
@@ -152,7 +155,13 @@ class PortfolioIndicatorCalculator:
             return []
 
         cache = self.htf_cache[symbol]
-        return [bar for bar in cache.bars if bar.timestamp <= timestamp]
+        bars = cache.bars
+
+        # Bars should be sorted by timestamp (from database ORDER BY timestamp)
+        # Use binary search to find insertion point
+        # bisect_right returns the index where timestamp would be inserted to maintain sorted order
+        idx = bisect.bisect_right(bars, timestamp, key=lambda b: b.timestamp)
+        return bars[:idx]
 
     def preload_htf_data_for_portfolio(
         self,

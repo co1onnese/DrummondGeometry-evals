@@ -73,6 +73,45 @@ class IntervalData(BaseModel):
         return int(value)
 
     @classmethod
+    def _parse_timestamp_to_utc(cls, value: Any) -> datetime:
+        """Parse timestamp from API and convert to UTC.
+
+        EODHD API returns timestamps in Europe/Prague timezone.
+        This ensures all timestamps are stored in UTC.
+
+        Args:
+            value: Timestamp value (string, datetime, etc.)
+
+        Returns:
+            UTC datetime
+        """
+        from datetime import timezone
+        from zoneinfo import ZoneInfo
+
+        if value is None:
+            raise ValueError("Timestamp is required")
+
+        # If it's already a datetime, ensure it's in UTC
+        if isinstance(value, datetime):
+            # If timezone-aware, convert to UTC
+            if value.tzinfo is not None:
+                return value.astimezone(timezone.utc)
+            # If naive, assume it's in Europe/Prague and convert to UTC
+            else:
+                return value.replace(tzinfo=ZoneInfo("Europe/Prague")).astimezone(timezone.utc)
+
+        # If it's a string, parse and convert
+        if isinstance(value, str):
+            dt = datetime.fromisoformat(value)
+            # If no timezone info, assume Europe/Prague
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=ZoneInfo("Europe/Prague"))
+            # Convert to UTC
+            return dt.astimezone(timezone.utc)
+
+        raise TypeError(f"Unsupported timestamp type: {type(value)}")
+
+    @classmethod
     def from_api_record(
         cls,
         record: Dict[str, Any],
@@ -83,10 +122,12 @@ class IntervalData(BaseModel):
         if not symbol:
             raise ValueError("API record missing symbol identifier")
 
+        timestamp_raw = record.get("timestamp") or record.get("datetime") or record.get("date")
+
         data = {
             "symbol": symbol,
             "exchange": record.get("exchange_short_name"),
-            "timestamp": record.get("timestamp") or record.get("datetime") or record.get("date"),
+            "timestamp": cls._parse_timestamp_to_utc(timestamp_raw),
             "interval": interval,
             "open": record.get("open"),
             "high": record.get("high"),

@@ -114,6 +114,11 @@ class PortfolioPositionManager:
         # Risk tracking
         self.current_portfolio_risk = Decimal("0")
 
+        # Equity caching
+        self._cached_equity: Decimal | None = None
+        self._cached_equity_timestamp: datetime | None = None
+        self._cached_equity_prices: Dict[str, Decimal] | None = None
+
     def get_current_state(self, timestamp: datetime, prices: Dict[str, Decimal]) -> PortfolioState:
         """Get current portfolio state.
 
@@ -124,13 +129,36 @@ class PortfolioPositionManager:
         Returns:
             PortfolioState snapshot
         """
-        total_position_value = Decimal("0")
+        # Check if cache is valid (same timestamp and prices)
+        cache_valid = (
+            self._cached_equity is not None
+            and self._cached_equity_timestamp == timestamp
+            and self._cached_equity_prices == prices
+        )
 
-        for symbol, portfolio_pos in self.positions.items():
-            price = prices.get(symbol, portfolio_pos.position.entry_price)
-            total_position_value += portfolio_pos.position.market_value(price)
+        if cache_valid:
+            # Use cached equity
+            total_equity = self._cached_equity
+            # Still need to calculate position value for PortfolioState
+            total_position_value = Decimal("0")
+            for symbol, portfolio_pos in self.positions.items():
+                price = prices.get(symbol, portfolio_pos.position.entry_price)
+                total_position_value += portfolio_pos.position.market_value(price)
+        else:
+            # Recalculate equity
+            total_position_value = Decimal("0")
 
-        total_equity = self.cash + total_position_value
+            for symbol, portfolio_pos in self.positions.items():
+                price = prices.get(symbol, portfolio_pos.position.entry_price)
+                total_position_value += portfolio_pos.position.market_value(price)
+
+            total_equity = self.cash + total_position_value
+
+            # Cache the result
+            self._cached_equity = total_equity
+            self._cached_equity_timestamp = timestamp
+            self._cached_equity_prices = prices.copy() if prices else None
+
         available_capital = total_equity - total_position_value
 
         return PortfolioState(
@@ -191,6 +219,7 @@ class PortfolioPositionManager:
         entry_price: Decimal,
         stop_loss: Decimal,
         direction: int,  # 1 for long, -1 for short
+        current_prices: Dict[str, Decimal] | None = None,
     ) -> tuple[Decimal, Decimal]:
         """Calculate position size based on portfolio risk.
 
@@ -199,6 +228,9 @@ class PortfolioPositionManager:
             entry_price: Entry price
             stop_loss: Stop loss price
             direction: 1 for long, -1 for short
+            current_prices: Current market prices for all symbols {symbol: price}.
+                          If provided, uses current prices for equity calculation.
+                          If None, falls back to entry_price for existing positions.
 
         Returns:
             Tuple of (quantity, risk_amount)
@@ -210,11 +242,25 @@ class PortfolioPositionManager:
         if risk_per_unit == 0:
             return (Decimal("0"), Decimal("0"))
 
-        # Calculate portfolio risk budget for this trade
-        current_equity = self.cash + sum(
-            pos.position.market_value(pos.position.entry_price)
-            for pos in self.positions.values()
-        )
+        # Try to use cached equity if available and prices match
+        if current_prices and self._cached_equity is not None and self._cached_equity_prices == current_prices:
+            current_equity = self._cached_equity
+        else:
+            # Calculate portfolio equity using current prices if available
+            if current_prices:
+                # Use current prices for all positions
+                current_equity = self.cash + sum(
+                    pos.position.market_value(
+                        current_prices.get(pos.symbol, pos.position.entry_price)
+                    )
+                    for pos in self.positions.values()
+                )
+            else:
+                # Fall back to entry_price if no current prices provided
+                current_equity = self.cash + sum(
+                    pos.position.market_value(pos.position.entry_price)
+                    for pos in self.positions.values()
+                )
 
         risk_budget = current_equity * self.risk_per_trade_pct
 
@@ -348,6 +394,9 @@ class PortfolioPositionManager:
         self.current_portfolio_risk -= portfolio_pos.risk_amount
         del self.positions[symbol]
         self.closed_trades.append(trade)
+
+        # Invalidate equity cache since positions changed
+        self._invalidate_equity_cache()
 
         return trade
 

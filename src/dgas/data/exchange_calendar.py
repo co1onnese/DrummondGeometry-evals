@@ -43,6 +43,10 @@ class ExchangeCalendar:
             settings = get_settings()
         self.settings = settings
 
+        # In-memory cache for trading calendar data
+        # Key: (exchange_code, date), Value: (is_trading_day, trading_hours or None)
+        self._calendar_cache: dict[tuple[str, date], tuple[bool, Optional[tuple[time, time]]]] = {}
+
     def fetch_exchange_details(
         self,
         exchange_code: str,
@@ -180,6 +184,12 @@ class ExchangeCalendar:
         Raises:
             ExchangeCalendarError: If exchange not found or data not synced
         """
+        # Check in-memory cache first
+        cache_key = (exchange_code, check_date)
+        if cache_key in self._calendar_cache:
+            is_trading, _ = self._calendar_cache[cache_key]
+            return is_trading
+
         from ..db import get_connection
 
         with get_connection() as conn:
@@ -212,9 +222,13 @@ class ExchangeCalendar:
 
                 if result is None:
                     # Still not found, assume non-trading day
-                    return False
+                    is_trading = False
+                else:
+                    is_trading = result[0]
 
-                return result[0]
+                # Cache the result (no trading hours available for this call)
+                self._calendar_cache[cache_key] = (is_trading, None)
+                return is_trading
 
     def get_trading_hours(
         self,
@@ -235,6 +249,12 @@ class ExchangeCalendar:
         Raises:
             ExchangeCalendarError: If exchange not found
         """
+        # Check in-memory cache first
+        cache_key = (exchange_code, check_date)
+        if cache_key in self._calendar_cache:
+            is_trading, hours = self._calendar_cache[cache_key]
+            return hours
+
         from ..db import get_connection
 
         with get_connection() as conn:
@@ -254,13 +274,17 @@ class ExchangeCalendar:
                 result = cur.fetchone()
 
                 if result is None or not result[0]:
+                    # Cache the result
+                    self._calendar_cache[cache_key] = (False, None)
                     return None
 
                 actual_open, actual_close = result[1], result[2]
 
                 # If actual times are set (half-day or special hours), use them
                 if actual_open and actual_close:
-                    return (actual_open, actual_close)
+                    hours = (actual_open, actual_close)
+                    self._calendar_cache[cache_key] = (True, hours)
+                    return hours
 
                 # Otherwise, get default exchange hours
                 cur.execute(
@@ -276,7 +300,10 @@ class ExchangeCalendar:
                 if result is None:
                     raise ExchangeCalendarError(f"Exchange {exchange_code} not found")
 
-                return (result[0], result[1])
+                hours = (result[0], result[1])
+                # Cache the result
+                self._calendar_cache[cache_key] = (True, hours)
+                return hours
 
     def _is_recently_synced(self, exchange_code: str) -> bool:
         """Check if exchange was synced within the last 24 hours."""

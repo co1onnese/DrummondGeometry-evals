@@ -6,6 +6,7 @@ ranking signals and managing positions across the entire portfolio.
 
 from __future__ import annotations
 
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -254,7 +255,7 @@ class PortfolioBacktestEngine:
             return
 
         # Generate entry signals for all symbols
-        entry_signals = self._generate_entry_signals(timestep, portfolio_state)
+        entry_signals = self._generate_entry_signals(timestep, portfolio_state, current_prices)
 
         # Rank and select best signals
         if entry_signals:
@@ -327,8 +328,13 @@ class PortfolioBacktestEngine:
             except ValueError as e:
                 return (symbol, None, str(e))
 
+        # Calculate optimal worker count based on CPU cores and symbol count
+        cpu_count = os.cpu_count() or 4
+        symbol_count = len(eligible_symbols)
+        optimal_workers = min(cpu_count, symbol_count, 8)  # Cap at 8 to avoid over-subscription
+
         # Use ThreadPoolExecutor for parallel indicator calculation
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=optimal_workers) as executor:
             # Submit all indicator calculation tasks
             futures = {
                 executor.submit(calculate_indicators_for_symbol, symbol_data): symbol_data[0]
@@ -403,6 +409,7 @@ class PortfolioBacktestEngine:
                             entry_price,
                             stop_loss,
                             1 if signal.action == SignalAction.ENTER_LONG else -1,
+                            current_prices=current_prices,
                         )
 
                         # Scale by confidence if enabled
@@ -450,12 +457,18 @@ class PortfolioBacktestEngine:
         try:
             side = PositionSide.LONG if ranked_signal.is_long else PositionSide.SHORT
 
+            # Get current prices for equity calculation
+            current_prices = {
+                symbol: bar.close for symbol, bar in timestep.bars.items()
+            }
+
             # Calculate position size
             quantity, risk_amount = self.position_manager.calculate_position_size(
                 ranked_signal.symbol,
                 ranked_signal.entry_price,
                 ranked_signal.stop_loss or ranked_signal.entry_price * Decimal("0.98"),
                 1 if ranked_signal.is_long else -1,
+                current_prices=current_prices,
             )
 
             if quantity > 0:
