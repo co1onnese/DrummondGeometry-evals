@@ -120,6 +120,9 @@ class PortfolioBacktestEngine:
         # State tracking
         self.equity_curve: List[PortfolioSnapshot] = []
         self.history_by_symbol: Dict[str, any] = {}
+        
+        # Signal evaluation tracking
+        self.signal_evaluator = SignalEvaluator()
 
     def run(
         self,

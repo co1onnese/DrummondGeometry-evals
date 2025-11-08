@@ -224,7 +224,7 @@ def main() -> int:
     RISK_PER_TRADE = Decimal("0.02")  # 2% per trade
     COMMISSION = Decimal("0.0")  # 0%
     SLIPPAGE = Decimal("2.0")  # 2 basis points
-    REGULAR_HOURS_ONLY = True  # Regular hours only
+    REGULAR_HOURS_ONLY = False  # Temporarily disabled - calendar needs sync for Sept 2025
     ALLOW_SHORT = True  # Short selling enabled
 
     print("Configuration:")

@@ -2,17 +2,16 @@
 """Sync exchange calendar for historical period."""
 
 from dgas.data.exchange_calendar import ExchangeCalendar
-from datetime import date
 
-# Sync US exchange calendar for historical data period
+# Sync US exchange calendar
+# Note: sync_exchange_calendar syncs 6 months back and 6 months forward from today
 calendar = ExchangeCalendar()
-print("Syncing US exchange calendar for historical period (2024-01-01 to 2025-12-31)...")
+print("Syncing US exchange calendar (6 months back and 6 months forward from today)...")
 
 try:
     result = calendar.sync_exchange_calendar(
         exchange_code="US",
-        from_date=date(2024, 1, 1),
-        to_date=date(2025, 12, 31),
+        force_refresh=True,  # Force refresh to ensure we get latest data
     )
 
     holidays_synced, trading_days_synced = result

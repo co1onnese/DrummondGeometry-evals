@@ -47,49 +47,48 @@ def filter_to_regular_hours(
 
     filtered_bars = []
 
-    # US market hours in UTC (9:30 AM - 4:00 PM EST = 14:30 - 21:00 UTC in winter, 13:30 - 20:00 UTC in summer)
-    # But bar timestamps are stored in Europe/Prague timezone, so we need to convert
+    # US market hours: 9:30 AM - 4:00 PM Eastern Time
+    # Bar timestamps are stored in Europe/Berlin (Europe/Prague) timezone
+    # We need to convert to US/Eastern timezone to check trading hours
+
+    us_tz = ZoneInfo("America/New_York")
+    
+    # Determine source timezone - bars are stored in Europe/Berlin/Prague
+    # If bar has timezone info, use it; otherwise assume Europe/Berlin
+    source_tz = None
+    if bars and bars[0].timestamp.tzinfo:
+        source_tz = bars[0].timestamp.tzinfo
+    else:
+        source_tz = ZoneInfo("Europe/Berlin")
 
     for bar in bars:
-        # Get the date for this bar
-        bar_date = bar.timestamp.date()
+        # Convert bar timestamp to US/Eastern timezone first
+        if bar.timestamp.tzinfo is None:
+            # If naive, assume it's in source timezone
+            bar_with_tz = bar.timestamp.replace(tzinfo=source_tz)
+        else:
+            bar_with_tz = bar.timestamp
+        
+        # Convert to US/Eastern timezone
+        us_time = bar_with_tz.astimezone(us_tz)
+        
+        # Use US date for checking trading days (important for timezone boundaries)
+        us_date = us_time.date()
+        us_time_of_day = us_time.time()
 
-        # Check if trading day
-        if not calendar.is_trading_day(exchange_code, bar_date):
+        # Check if trading day (using US date)
+        if not calendar.is_trading_day(exchange_code, us_date):
             continue
 
-        # Get trading hours for this specific date
-        hours = calendar.get_trading_hours(exchange_code, bar_date)
+        # Get trading hours for this specific US date
+        hours = calendar.get_trading_hours(exchange_code, us_date)
         if hours is None:
             continue
 
         market_open, market_close = hours
 
-        # The bar timestamp is in Europe/Prague timezone
-        # We need to check if it's during US market hours
-        # US market: 9:30 AM - 4:00 PM New York time
-        # New York is UTC-5 (winter) / UTC-4 (summer)
-        # Prague is UTC+1 (winter) / UTC+2 (summer)
-        # So Prague is 6 hours ahead of New York in winter, 6 hours ahead in summer
-
-        # Convert bar timestamp to US/Eastern timezone
-        us_tz = ZoneInfo("America/New_York")
-        prague_tz = ZoneInfo("Europe/Prague")
-
-        # Ensure the timestamp has Prague timezone info
-        if bar.timestamp.tzinfo is None:
-            # If naive, assume it's in Prague
-            bar_local = bar.timestamp.replace(tzinfo=prague_tz)
-        else:
-            # If it has timezone, convert to Prague for comparison
-            bar_local = bar.timestamp.astimezone(prague_tz)
-
-        # Convert to US timezone
-        us_time = bar_local.astimezone(us_tz)
-        bar_time = us_time.time()
-
         # Check if bar is within US trading hours
-        if market_open <= bar_time < market_close:
+        if market_open <= us_time_of_day < market_close:
             filtered_bars.append(bar)
 
     return filtered_bars
