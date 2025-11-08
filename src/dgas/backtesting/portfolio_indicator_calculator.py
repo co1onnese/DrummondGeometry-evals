@@ -132,7 +132,11 @@ class PortfolioIndicatorCalculator:
             target_timestamp=current_bar.timestamp,
         )
 
-        return {"analysis": analysis}
+        return {
+            "analysis": analysis,
+            "htf_data": htf_data,
+            "trading_tf_data": trading_data,
+        }
 
     def _get_htf_bars_up_to(
         self,

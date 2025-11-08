@@ -17,13 +17,14 @@ from dgas.backtesting.portfolio_data_loader import PortfolioDataLoader
 # Test with 10 symbols first
 symbols = ["AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "NVDA", "META", "TSLA", "AVGO", "PEP"]
 
+# TEST WITH regular hours filtering
+loader = PortfolioDataLoader(regular_hours_only=True, exchange_code="US")
+
 start = datetime(2025, 8, 8, tzinfo=timezone.utc)
 end = datetime(2025, 11, 1, tzinfo=timezone.utc)
 
-print("Testing data loader with 30 symbols...")
+print("Testing data loader with 10 symbols (WITH regular hours filtering)...")
 print(f"Period: {start.date()} to {end.date()}")
-
-loader = PortfolioDataLoader(regular_hours_only=True, exchange_code="US")
 
 import time
 t0 = time.time()

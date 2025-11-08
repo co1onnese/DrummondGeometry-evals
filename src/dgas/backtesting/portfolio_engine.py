@@ -24,6 +24,7 @@ from .portfolio_position_manager import PortfolioPositionManager, PortfolioState
 from .portfolio_indicator_calculator import PortfolioIndicatorCalculator
 from .signal_ranker import RankedSignal, SignalRanker
 from .strategies.base import BaseStrategy, StrategyContext, rolling_history
+from .signal_evaluator import SignalEvaluator
 
 
 @dataclass
@@ -197,7 +198,33 @@ class PortfolioBacktestEngine:
 
         print(f"\n\nBacktest complete!")
 
+        # Register all closed trades with signal evaluator
+        for trade in self.position_manager.closed_trades:
+            # Try to find signal_id from trade metadata if available
+            # Note: Trade objects don't have metadata, so we'll match by symbol and time proximity
+            self.signal_evaluator.register_trade(trade, signal_id=None)
+        
+        # Calculate signal accuracy metrics
+        accuracy_metrics = self.signal_evaluator.calculate_metrics()
+        
         # Create result
+        metadata = {
+            "data_summary": summary,
+            "final_position_count": len(self.position_manager.positions),
+            "signal_accuracy": {
+                "total_signals": accuracy_metrics.total_signals,
+                "executed_signals": accuracy_metrics.executed_signals,
+                "win_rate": accuracy_metrics.win_rate,
+                "winning_signals": accuracy_metrics.winning_signals,
+                "losing_signals": accuracy_metrics.losing_signals,
+                "avg_confidence_winning": accuracy_metrics.avg_confidence_winning,
+                "avg_confidence_losing": accuracy_metrics.avg_confidence_losing,
+                "signals_by_type": accuracy_metrics.signals_by_type,
+                "win_rate_by_type": accuracy_metrics.win_rate_by_type,
+                "win_rate_by_confidence_bucket": accuracy_metrics.win_rate_by_confidence_bucket,
+            },
+        }
+        
         result = PortfolioBacktestResult(
             config=self.config,
             symbols=symbols,
@@ -209,10 +236,7 @@ class PortfolioBacktestEngine:
             start_date=timeline[0].timestamp if timeline else start,
             end_date=timeline[-1].timestamp if timeline else end,
             total_bars=len(timeline),
-            metadata={
-                "data_summary": summary,
-                "final_position_count": len(self.position_manager.positions),
-            },
+            metadata=metadata,
         )
 
         return result
@@ -255,7 +279,7 @@ class PortfolioBacktestEngine:
             return
 
         # Generate entry signals for all symbols
-        entry_signals = self._generate_entry_signals(timestep, portfolio_state, current_prices)
+        entry_signals = self._generate_entry_signals(timestep, portfolio_state)
 
         # Rank and select best signals
         if entry_signals:
@@ -331,7 +355,7 @@ class PortfolioBacktestEngine:
         # Calculate optimal worker count based on CPU cores and symbol count
         cpu_count = os.cpu_count() or 4
         symbol_count = len(eligible_symbols)
-        optimal_workers = min(cpu_count, symbol_count, 8)  # Cap at 8 to avoid over-subscription
+        optimal_workers = min(cpu_count, max(symbol_count, 1), 8)  # Cap at 8, ensure at least 1
 
         # Use ThreadPoolExecutor for parallel indicator calculation
         with ThreadPoolExecutor(max_workers=optimal_workers) as executor:
@@ -382,6 +406,43 @@ class PortfolioBacktestEngine:
 
             # Convert to ranked signals
             for signal in strategy_signals:
+                # Register signal with evaluator if it's from PredictionSignalStrategy
+                if hasattr(self.strategy, '_get_signal_generator'):
+                    # This is a PredictionSignalStrategy - register the signal
+                    # Extract signal info from metadata
+                    metadata = dict(signal.metadata) if signal.metadata else {}
+                    signal_id = metadata.get("signal_id")
+                    if signal_id:
+                        # Reconstruct GeneratedSignal from metadata for evaluation
+                        from ...prediction.engine import GeneratedSignal, SignalType
+                        from ...calculations.states import TrendDirection
+                        
+                        try:
+                            signal_type_str = "LONG" if signal.action == SignalAction.ENTER_LONG else "SHORT"
+                            signal_type = SignalType[signal_type_str]
+                            
+                            gen_signal = GeneratedSignal(
+                                symbol=symbol,
+                                signal_timestamp=bar.timestamp,
+                                signal_type=signal_type,
+                                entry_price=Decimal(metadata.get("entry_price", bar.close)),
+                                stop_loss=Decimal(metadata.get("stop_loss", bar.close * Decimal("0.98"))),
+                                target_price=Decimal(metadata.get("target_price", bar.close * Decimal("1.02"))),
+                                confidence=float(metadata.get("confidence", 0.5)),
+                                signal_strength=float(metadata.get("signal_strength", 0.5)),
+                                timeframe_alignment=float(metadata.get("timeframe_alignment", 0.5)),
+                                risk_reward_ratio=float(metadata.get("risk_reward_ratio", 2.0)),
+                                htf_trend=TrendDirection[metadata.get("htf_trend", "UP")],
+                                trading_tf_state=metadata.get("trading_tf_state", "TREND"),
+                                confluence_zones_count=int(metadata.get("confluence_zones_count", 0)),
+                                pattern_context={},
+                                htf_timeframe=metadata.get("htf_timeframe", "1d"),
+                                trading_timeframe=metadata.get("trading_timeframe", "30m"),
+                            )
+                            self.signal_evaluator.register_signal(gen_signal)
+                        except Exception:
+                            # If signal reconstruction fails, skip evaluation
+                            pass
                 if signal.action in [SignalAction.ENTER_LONG, SignalAction.ENTER_SHORT]:
                     # Extract metadata
                     metadata = dict(signal.metadata) if signal.metadata else {}

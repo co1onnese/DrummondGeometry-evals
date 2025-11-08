@@ -145,11 +145,13 @@ class PortfolioDataLoader:
                 params: list[object] = [list(symbols), interval]
 
                 if start is not None:
-                    base_query.append("AND md.timestamp >= %s")
+                    # Convert UTC start time to Europe/Prague for query
+                    base_query.append("AND md.timestamp >= (%s AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Prague')")
                     params.append(start)
 
                 if end is not None:
-                    base_query.append("AND md.timestamp <= %s")
+                    # Convert UTC end time to Europe/Prague for query
+                    base_query.append("AND md.timestamp <= (%s AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Prague')")
                     params.append(end)
 
                 base_query.append("ORDER BY s.symbol, md.timestamp ASC")
@@ -197,7 +199,6 @@ class PortfolioDataLoader:
                     # Filter to regular hours if requested
                     if self.regular_hours_only:
                         filtered_bars = filter_to_regular_hours(raw_bars, self.exchange_code, calendar)
-                        print(f"DEBUG: {symbol}: {len(raw_bars)} bars -> {len(filtered_bars)} after filtering")
                     else:
                         filtered_bars = raw_bars
 

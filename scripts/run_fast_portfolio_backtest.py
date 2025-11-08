@@ -83,7 +83,7 @@ def main() -> int:
     RISK_PER_TRADE = Decimal("0.02")
     COMMISSION = Decimal("0.0")
     SLIPPAGE = Decimal("2.0")
-    REGULAR_HOURS_ONLY = True
+    REGULAR_HOURS_ONLY = False  # Disabled for historical data (exchange calendar not synced for 2024)
 
     print("Configuration:")
     print(f"  Date Range: {START_DATE.date()} to {END_DATE.date()}")

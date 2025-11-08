@@ -6,10 +6,12 @@ from typing import Any, Dict, Mapping, Type
 
 from .base import BaseStrategy, StrategyConfig
 from .multi_timeframe import MultiTimeframeStrategy, MultiTimeframeStrategyConfig
+from .prediction_signal import PredictionSignalStrategy, PredictionSignalStrategyConfig
 
 
 STRATEGY_REGISTRY: Dict[str, Type[BaseStrategy]] = {
     "multi_timeframe": MultiTimeframeStrategy,
+    "prediction_signal": PredictionSignalStrategy,
 }
 
 
