@@ -93,6 +93,7 @@ class MultiTimeframeStrategy(BaseStrategy):
             "zone_weight": str(zone.weighted_strength),
             "zone_type": zone.zone_type,
             "trail_stop": str(stop_price),
+            "take_profit": str(target_price),
         }
 
         self._trail_state[context.symbol] = {
@@ -137,10 +138,13 @@ class MultiTimeframeStrategy(BaseStrategy):
             }
 
         if trail_price is not None:
-            if direction == TrendDirection.UP and last_close <= trail_price:
+            # Check trailing stop using intraday prices (bar.high/bar.low)
+            # LONG: exit if bar.low touched or went below trail_price
+            if direction == TrendDirection.UP and context.bar.low <= trail_price:
                 self._trail_state.pop(context.symbol, None)
                 return Signal(SignalAction.EXIT_LONG)
-            if direction == TrendDirection.DOWN and last_close >= trail_price:
+            # SHORT: exit if bar.high touched or went above trail_price
+            if direction == TrendDirection.DOWN and context.bar.high >= trail_price:
                 self._trail_state.pop(context.symbol, None)
                 return Signal(SignalAction.EXIT_SHORT)
 

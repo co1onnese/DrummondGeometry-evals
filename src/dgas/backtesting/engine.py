@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 from typing import Iterable
 
 from ..data.models import IntervalData
@@ -17,11 +17,8 @@ from .entities import (
     SimulationConfig,
     Trade,
 )
+from .execution.trade_executor import BaseTradeExecutor
 from .strategies.base import BaseStrategy, StrategyContext, rolling_history
-
-
-BASIS_POINT = Decimal("10000")
-QUANTITY_STEP = Decimal("0.0001")
 
 
 class SimulationEngine:
@@ -29,6 +26,10 @@ class SimulationEngine:
 
     def __init__(self, config: SimulationConfig | None = None) -> None:
         self.config = config or SimulationConfig()
+        self.executor = BaseTradeExecutor(
+            commission_rate=self.config.commission_rate,
+            slippage_bps=self.config.slippage_bps,
+        )
 
     def run(self, dataset: BacktestDataset, strategy: BaseStrategy) -> BacktestResult:
         bars = list(dataset.bars)
@@ -61,6 +62,34 @@ class SimulationEngine:
                 pending_signals = []
 
             history.append(bar)
+
+            # Check stop-loss/take-profit BEFORE strategy signal generation
+            # This ensures stops are checked using intraday prices (bar.high/bar.low)
+            if position:
+                exit_signal, exit_price = self._check_stop_loss_take_profit(position, bar)
+                if exit_signal:
+                    # Close position at the appropriate exit price (stop-loss/take-profit or bar.close)
+                    trade, cash = self._close_position(
+                        dataset.symbol,
+                        position,
+                        bar,
+                        cash,
+                        exit_price if exit_price is not None else bar.close,
+                    )
+                    if trade:
+                        trades.append(trade)
+                    position = None
+                    # Record equity after closing position
+                    equity = cash
+                    equity_curve.append(
+                        PortfolioSnapshot(
+                            timestamp=bar.timestamp,
+                            equity=equity,
+                            cash=cash,
+                        )
+                    )
+                    # Skip strategy signal generation since we already exited
+                    continue
 
             market_value = position.market_value(bar.close) if position else Decimal("0")
             equity = cash + market_value
@@ -196,16 +225,25 @@ class SimulationEngine:
                 trades.append(trade)
             position = None
 
-        fill_price = self._apply_slippage(base_price, side, is_entry=True)
-        fallback_qty = self._default_quantity(cash, fill_price)
-        quantity = self._normalize_quantity(signal.resolved_size(fallback_qty))
+        # Calculate quantity
+        fallback_qty = self._default_quantity(cash, base_price)
+        quantity = self.executor.normalize_quantity(signal.resolved_size(fallback_qty))
 
         if quantity <= 0:
             return trades, position, cash
 
-        commission = self._compute_commission(quantity, fill_price)
-        notional = quantity * fill_price
+        # Open position using executor
+        position, commission = self.executor.open_position(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            entry_price=base_price,
+            entry_time=bar.timestamp,
+            metadata=dict(signal.metadata),
+        )
 
+        # Update cash
+        notional = quantity * position.entry_price
         if side is PositionSide.LONG:
             total_cost = notional + commission
             if cash < total_cost:
@@ -213,16 +251,6 @@ class SimulationEngine:
             cash -= total_cost
         else:
             cash += notional - commission
-
-        position = Position(
-            symbol=symbol,
-            side=side,
-            quantity=quantity,
-            entry_price=fill_price,
-            entry_time=bar.timestamp,
-            entry_commission=commission,
-            notes=dict(signal.metadata),
-        )
 
         return trades, position, cash
 
@@ -232,66 +260,96 @@ class SimulationEngine:
         position: Position,
         bar: IntervalData,
         cash: Decimal,
-        base_price: Decimal,
+        exit_price: Decimal,
     ) -> tuple[Trade | None, Decimal]:
-        fill_price = self._apply_slippage(base_price, position.side, is_entry=False)
-        commission = self._compute_commission(position.quantity, fill_price)
+        """Close a position at a specific exit price.
 
-        notional = position.quantity * fill_price
+        Args:
+            symbol: Symbol being traded
+            position: Position to close
+            bar: Current bar (for timestamp)
+            cash: Current cash
+            exit_price: Exit price (before slippage)
+
+        Returns:
+            Tuple of (Trade, updated_cash)
+        """
+        # Close position using executor (applies slippage)
+        trade = self.executor.close_position(
+            position=position,
+            exit_price=exit_price,
+            exit_time=bar.timestamp,
+        )
+
+        # Update cash
+        notional = position.quantity * trade.exit_price
+        exit_commission = trade.commission_paid - position.entry_commission
 
         if position.side is PositionSide.LONG:
-            cash += notional - commission
+            cash += notional - exit_commission
         else:
-            cash -= notional + commission
-
-        gross_profit = position.direction() * position.quantity * (fill_price - position.entry_price)
-        total_commission = position.entry_commission + commission
-        net_profit = gross_profit - total_commission
-
-        trade = Trade(
-            symbol=symbol,
-            side=position.side,
-            quantity=position.quantity,
-            entry_time=position.entry_time,
-            exit_time=bar.timestamp,
-            entry_price=position.entry_price,
-            exit_price=fill_price,
-            gross_profit=gross_profit,
-            net_profit=net_profit,
-            commission_paid=total_commission,
-        )
+            cash -= notional + exit_commission
 
         return trade, cash
 
-    def _apply_slippage(self, price: Decimal, side: PositionSide, *, is_entry: bool) -> Decimal:
-        if self.config.slippage_bps <= 0:
-            return price
+    def _check_stop_loss_take_profit(
+        self,
+        position: Position,
+        bar: IntervalData,
+    ) -> tuple[Signal | None, Decimal | None]:
+        """Check if stop-loss or take-profit was hit during the bar using intraday prices.
 
-        fraction = self.config.slippage_bps / BASIS_POINT
-        adjustment = price * fraction
+        Args:
+            position: Current position
+            bar: Current bar with high/low prices
 
-        if side is PositionSide.LONG:
-            return price + adjustment if is_entry else price - adjustment
-        return price - adjustment if is_entry else price + adjustment
+        Returns:
+            Tuple of (exit_signal, exit_price)
+            - exit_signal: Signal to exit if level hit, None otherwise
+            - exit_price: Price at which to exit (stop-loss/take-profit level), None if not hit
+        """
+        if not position.stop_loss and not position.take_profit:
+            return None, None
 
-    def _compute_commission(self, quantity: Decimal, price: Decimal) -> Decimal:
-        if self.config.commission_rate <= 0:
-            return Decimal("0")
-        return abs(quantity * price) * self.config.commission_rate
+        exit_signal = None
+        exit_price = None
+
+        if position.side == PositionSide.LONG:
+            # Check stop-loss: price touched or went below
+            if position.stop_loss and bar.low <= position.stop_loss:
+                exit_signal = Signal(SignalAction.EXIT_LONG)
+                exit_price = position.stop_loss
+                return exit_signal, exit_price
+
+            # Check take-profit: price touched or went above
+            if position.take_profit and bar.high >= position.take_profit:
+                exit_signal = Signal(SignalAction.EXIT_LONG)
+                exit_price = position.take_profit
+                return exit_signal, exit_price
+
+        else:  # SHORT
+            # Check stop-loss: price touched or went above
+            if position.stop_loss and bar.high >= position.stop_loss:
+                exit_signal = Signal(SignalAction.EXIT_SHORT)
+                exit_price = position.stop_loss
+                return exit_signal, exit_price
+
+            # Check take-profit: price touched or went below
+            if position.take_profit and bar.low <= position.take_profit:
+                exit_signal = Signal(SignalAction.EXIT_SHORT)
+                exit_price = position.take_profit
+                return exit_signal, exit_price
+
+        return None, None
 
     def _default_quantity(self, cash: Decimal, price: Decimal) -> Decimal:
+        """Calculate default position quantity based on available cash."""
         if price <= 0:
             return Decimal("0")
         alloc = cash * self.config.max_position_fraction
         if alloc <= 0:
             return Decimal("0")
-        return self._normalize_quantity(alloc / price)
-
-    @staticmethod
-    def _normalize_quantity(quantity: Decimal) -> Decimal:
-        if quantity <= 0:
-            return Decimal("0")
-        return quantity.quantize(QUANTITY_STEP, rounding=ROUND_DOWN)
+        return self.executor.normalize_quantity(alloc / price)
 
 
 __all__ = ["SimulationEngine"]

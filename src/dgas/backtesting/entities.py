@@ -57,6 +57,9 @@ class Position:
     entry_price: Decimal
     entry_time: datetime
     entry_commission: Decimal = Decimal("0")
+    stop_loss: Decimal | None = None  # Stop-loss price level
+    take_profit: Decimal | None = None  # Take-profit price level
+    confidence: Decimal | None = None  # Signal confidence (0.0-1.0)
     notes: Mapping[str, Any] = field(default_factory=dict)
 
     def direction(self) -> Decimal:

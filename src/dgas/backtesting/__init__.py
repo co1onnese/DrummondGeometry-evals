@@ -12,6 +12,7 @@ from .entities import (
     SimulationConfig,
     Trade,
 )
+from .indicator_loader import load_indicators_batch, load_indicators_from_db
 from .strategies import BaseStrategy, StrategyConfig, StrategyContext, rolling_history
 from .metrics import PerformanceSummary, calculate_performance
 from .persistence import persist_backtest
@@ -33,7 +34,10 @@ __all__ = [
     "load_dataset",
     "load_ohlcv",
     "load_indicator_snapshots",
+    "load_indicators_from_db",
+    "load_indicators_batch",
     "assemble_bars",
+    "BaseTradeExecutor",
     "BaseStrategy",
     "StrategyConfig",
     "StrategyContext",
