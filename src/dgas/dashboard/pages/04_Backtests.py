@@ -15,19 +15,24 @@ from dgas.dashboard.components.charts import (
     format_percentage,
     format_number,
 )
-try:
-    from dgas.dashboard.components.database import fetch_backtest_results
-except KeyError as e:
-    # Handle Streamlit cache KeyError by re-importing
-    import importlib
-    import sys
-    # Clear the module from cache if it exists
-    module_name = 'dgas.dashboard.components.database'
-    if module_name in sys.modules:
-        del sys.modules[module_name]
-    # Re-import
-    importlib.import_module(module_name)
-    from dgas.dashboard.components.database import fetch_backtest_results
+# Lazy import to avoid Streamlit cache KeyError issues
+def _get_fetch_backtest_results():
+    """Get fetch_backtest_results function with error handling."""
+    try:
+        from dgas.dashboard.components.database import fetch_backtest_results
+        return fetch_backtest_results
+    except (KeyError, ImportError) as e:
+        # Handle Streamlit cache KeyError by re-importing
+        import importlib
+        import sys
+        # Clear the module from cache if it exists
+        module_name = 'dgas.dashboard.components.database'
+        if module_name in sys.modules:
+            del sys.modules[module_name]
+        # Re-import
+        importlib.import_module(module_name)
+        from dgas.dashboard.components.database import fetch_backtest_results
+        return fetch_backtest_results
 from dgas.dashboard.components.utils import (
     format_timestamp,
     download_dataframe,
@@ -61,6 +66,7 @@ def render() -> None:
 
     # Load data
     try:
+        fetch_backtest_results = _get_fetch_backtest_results()
         if symbol_filter == "All":
             backtests = fetch_backtest_results(limit=limit)
         else:
