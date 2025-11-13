@@ -268,14 +268,22 @@ def render() -> None:
             st.subheader("Risk-Return Analysis")
             scatter_data = backtests.copy()
 
+            # Prepare size data - use absolute value of max_drawdown since size must be >= 0
+            size_data = None
+            if "max_drawdown" in scatter_data.columns:
+                # Use absolute value and ensure non-negative
+                size_data = scatter_data["max_drawdown"].abs()
+                # Add small offset to avoid zero sizes
+                size_data = size_data + 0.01
+
             from plotly.express import scatter
             fig = scatter(
                 scatter_data,
                 x="total_return",
                 y="sharpe_ratio",
                 color="symbol" if "symbol" in scatter_data.columns else None,
-                size="max_drawdown" if "max_drawdown" in scatter_data.columns else None,
-                hover_data=["strategy_name", "win_rate"],
+                size=size_data if size_data is not None else None,
+                hover_data=["strategy_name", "win_rate", "max_drawdown"] if "max_drawdown" in scatter_data.columns else ["strategy_name", "win_rate"],
                 title="Risk vs Return",
                 labels={
                     "total_return": "Total Return",
