@@ -59,10 +59,11 @@ def fetch_system_overview() -> Dict[str, Any]:
     result: Dict[str, Any] = {}
 
     # Total active symbols (normalized - count unique base symbols without .US suffix)
+    # Note: %% escapes % for psycopg (so '%.US' becomes '%%.US')
     query = """
         SELECT COUNT(DISTINCT 
             CASE 
-                WHEN symbol LIKE '%.US' THEN SUBSTRING(symbol FROM 1 FOR LENGTH(symbol) - 3)
+                WHEN symbol LIKE '%%.US' THEN SUBSTRING(symbol FROM 1 FOR LENGTH(symbol) - 3)
                 ELSE symbol
             END
         )
@@ -115,10 +116,11 @@ def fetch_system_overview() -> Dict[str, Any]:
 
     # Data coverage (using 7 days to account for weekends when markets are closed)
     # Count distinct normalized symbols (remove .US suffix if present)
+    # Note: %% escapes % for psycopg (so '%.US' becomes '%%.US')
     query = """
         SELECT COUNT(DISTINCT 
             CASE 
-                WHEN s.symbol LIKE '%.US' THEN SUBSTRING(s.symbol FROM 1 FOR LENGTH(s.symbol) - 3)
+                WHEN s.symbol LIKE '%%.US' THEN SUBSTRING(s.symbol FROM 1 FOR LENGTH(s.symbol) - 3)
                 ELSE s.symbol
             END
         )
@@ -355,10 +357,11 @@ def fetch_system_status() -> Dict[str, Any]:
 
         # Recent data (using 7 days to account for weekends)
         # Count distinct normalized symbols (remove .US suffix if present)
+        # Note: %% escapes % for psycopg (so '%.US' becomes '%%.US')
         query = """
             SELECT COUNT(DISTINCT 
                 CASE 
-                    WHEN s.symbol LIKE '%.US' THEN SUBSTRING(s.symbol FROM 1 FOR LENGTH(s.symbol) - 3)
+                    WHEN s.symbol LIKE '%%.US' THEN SUBSTRING(s.symbol FROM 1 FOR LENGTH(s.symbol) - 3)
                     ELSE s.symbol
                 END
             )
