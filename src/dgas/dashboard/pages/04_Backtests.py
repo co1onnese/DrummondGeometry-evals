@@ -15,7 +15,19 @@ from dgas.dashboard.components.charts import (
     format_percentage,
     format_number,
 )
-from dgas.dashboard.components.database import fetch_backtest_results
+try:
+    from dgas.dashboard.components.database import fetch_backtest_results
+except KeyError as e:
+    # Handle Streamlit cache KeyError by re-importing
+    import importlib
+    import sys
+    # Clear the module from cache if it exists
+    module_name = 'dgas.dashboard.components.database'
+    if module_name in sys.modules:
+        del sys.modules[module_name]
+    # Re-import
+    importlib.import_module(module_name)
+    from dgas.dashboard.components.database import fetch_backtest_results
 from dgas.dashboard.components.utils import (
     format_timestamp,
     download_dataframe,

@@ -283,7 +283,27 @@ def fetch_backtest_results(limit: int = 10, symbol: Optional[str] = None) -> pd.
     params = [limit]
 
     if symbol:
-        query = query.replace("ORDER BY", "WHERE s.symbol = %s ORDER BY")
+        query = """
+            SELECT
+                br.backtest_id,
+                br.strategy_name,
+                s.symbol,
+                br.start_date,
+                br.end_date,
+                br.initial_capital,
+                br.final_capital,
+                br.total_return,
+                br.sharpe_ratio,
+                br.max_drawdown,
+                br.win_rate,
+                br.total_trades,
+                br.completed_at
+            FROM backtest_results br
+            JOIN market_symbols s ON s.symbol_id = br.symbol_id
+            WHERE s.symbol = %s
+            ORDER BY br.completed_at DESC
+            LIMIT %s
+        """
         params = [symbol, limit]
 
     rows = execute_query(query, tuple(params))
