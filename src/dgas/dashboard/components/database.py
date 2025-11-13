@@ -346,6 +346,20 @@ def fetch_backtest_results(limit: int = 10, symbol: Optional[str] = None) -> pd.
         ],
     )
 
+    # Convert numeric columns from Decimal/object to float
+    numeric_columns = [
+        "initial_capital",
+        "final_capital",
+        "total_return",
+        "sharpe_ratio",
+        "max_drawdown",
+        "win_rate",
+        "total_trades",
+    ]
+    for col in numeric_columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
     return df
 
 
