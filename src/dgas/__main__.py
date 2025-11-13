@@ -15,6 +15,7 @@ from .cli.predict import setup_predict_parser
 from .cli.report import setup_report_parser
 from .cli.scheduler_cli import setup_scheduler_parser
 from .cli.status_cli import setup_status_parser
+from .cli.data_collection_cli import setup_data_collection_parser
 from .monitoring import generate_ingestion_report, render_markdown_report, write_report
 
 
@@ -45,6 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Scheduler command
     setup_scheduler_parser(subparsers)
+
+    # Data collection command
+    setup_data_collection_parser(subparsers)
 
     # Status command
     setup_status_parser(subparsers)

@@ -6,24 +6,42 @@ import os
 import structlog
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..engine import GeneratedSignal
 
 logger = structlog.get_logger(__name__)
 
+# Load .env file if it exists
+try:
+    from dotenv import load_dotenv
+    # Try to load .env from project root
+    env_path = Path(__file__).parent.parent.parent.parent.parent / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+        logger.debug("Loaded .env file", path=str(env_path))
+    else:
+        # Fallback: try current directory
+        load_dotenv()
+except ImportError:
+    # python-dotenv not installed, skip
+    pass
+except Exception as e:
+    logger.warning("Failed to load .env file", error=str(e))
+
 
 @dataclass
 class NotificationConfig:
     """Configuration for notification delivery."""
 
-    # Enabled channels
-    enabled_channels: list[str] = field(default_factory=lambda: ["console", "discord"])
+    # Enabled channels (Discord is primary)
+    enabled_channels: list[str] = field(default_factory=lambda: ["discord"])
 
     # Discord configuration
     discord_bot_token: str | None = None  # From env: DGAS_DISCORD_BOT_TOKEN
     discord_channel_id: str | None = None  # From env: DGAS_DISCORD_CHANNEL_ID
-    discord_min_confidence: float = 0.5
+    discord_min_confidence: float = 0.65  # Match production config (65% minimum)
 
     # Console configuration
     console_max_signals: int = 10
@@ -36,7 +54,11 @@ class NotificationConfig:
     @classmethod
     def from_env(cls) -> NotificationConfig:
         """Create config from environment variables."""
+        # Discord is the ONLY notification channel (no console, no email)
+        enabled_channels = ["discord"]
+        
         return cls(
+            enabled_channels=enabled_channels,
             discord_bot_token=os.getenv("DGAS_DISCORD_BOT_TOKEN"),
             discord_channel_id=os.getenv("DGAS_DISCORD_CHANNEL_ID"),
         )
@@ -172,15 +194,27 @@ class NotificationRouter:
     ) -> list[GeneratedSignal]:
         """Filter signals based on channel-specific thresholds."""
         if channel == "discord":
-            min_conf = self.config.discord_min_confidence
+            min_conf = self.config.discord_min_confidence  # 0.65 (65%) from config
         elif channel == "console":
-            min_conf = 0.0  # Console shows all signals
+            min_conf = 0.0  # Console shows all signals (if enabled)
         elif channel == "webhook":
             min_conf = self.config.webhook_min_confidence
         else:
             min_conf = 0.5  # Default threshold
 
-        return [s for s in signals if s.confidence >= min_conf]
+        filtered = [s for s in signals if s.confidence >= min_conf]
+        
+        # Log filtering results for debugging
+        if channel == "discord" and len(signals) > 0:
+            logger.debug(
+                "discord_signal_filtering",
+                total_signals=len(signals),
+                filtered_signals=len(filtered),
+                min_confidence=min_conf,
+                signals_above_threshold=[s.symbol for s in filtered],
+            )
+        
+        return filtered
 
     def get_notification_metadata(
         self,

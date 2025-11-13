@@ -3,14 +3,8 @@
 This module contains all dashboard page components.
 """
 
-from dgas.dashboard.pages import (
-    Overview,
-    Data,
-    Predictions,
-    Backtests,
-    SystemStatus,
-    CustomDashboard,
-)
+# No imports here to avoid circular dependencies
+# Pages should be imported directly from their modules
 
 __all__ = [
     "Overview",

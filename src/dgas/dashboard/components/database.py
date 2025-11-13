@@ -16,22 +16,24 @@ from dgas.db import get_connection
 from dgas.dashboard.performance import cached_query, performance_timer
 
 
-@st.cache_resource
-def get_db_connection() -> Connection:
+def get_db_connection():
     """
-    Get cached database connection.
+    Get database connection context manager.
+    
+    Note: This cannot be cached with @st.cache_resource because get_connection()
+    returns a context manager (GeneratorContextManager), which cannot be
+    serialized or cached by Streamlit. Each call creates a new context manager.
 
     Returns:
-        Database connection
+        Context manager for database connection
     """
     return get_connection()
 
 
-@cached_query(ttl=300, key_prefix="db")
 @performance_timer
 def execute_query(query: str, params: Optional[tuple] = None) -> List[Tuple]:
     """
-    Execute query with caching.
+    Execute query.
 
     Args:
         query: SQL query string
@@ -56,8 +58,17 @@ def fetch_system_overview() -> Dict[str, Any]:
     """
     result: Dict[str, Any] = {}
 
-    # Total symbols
-    query = "SELECT COUNT(*) FROM market_symbols"
+    # Total active symbols (normalized - count unique base symbols without .US suffix)
+    query = """
+        SELECT COUNT(DISTINCT 
+            CASE 
+                WHEN symbol LIKE '%.US' THEN SUBSTRING(symbol FROM 1 FOR LENGTH(symbol) - 3)
+                ELSE symbol
+            END
+        )
+        FROM market_symbols
+        WHERE is_active = true
+    """
     rows = execute_query(query)
     result["total_symbols"] = rows[0][0] if rows else 0
 
@@ -66,21 +77,21 @@ def fetch_system_overview() -> Dict[str, Any]:
     rows = execute_query(query)
     result["total_data_bars"] = rows[0][0] if rows else 0
 
-    # Recent predictions (24h)
+    # Recent predictions (7 days - to account for weekends)
     query = """
         SELECT COUNT(*)
         FROM prediction_runs
-        WHERE timestamp > NOW() - INTERVAL '24 hours'
+        WHERE created_at > NOW() - INTERVAL '7 days'
     """
     rows = execute_query(query)
     result["predictions_24h"] = rows[0][0] if rows else 0
 
-    # Recent signals (24h)
+    # Recent signals (7 days - to account for weekends)
     query = """
         SELECT COUNT(*)
-        FROM prediction_signals ps
-        JOIN prediction_runs pr ON pr.run_id = ps.run_id
-        WHERE pr.timestamp > NOW() - INTERVAL '24 hours'
+        FROM generated_signals gs
+        JOIN prediction_runs pr ON pr.run_id = gs.run_id
+        WHERE pr.created_at > NOW() - INTERVAL '7 days'
     """
     rows = execute_query(query)
     result["signals_24h"] = rows[0][0] if rows else 0
@@ -102,12 +113,19 @@ def fetch_system_overview() -> Dict[str, Any]:
     else:
         result["latest_backtest"] = None
 
-    # Data coverage
+    # Data coverage (using 7 days to account for weekends when markets are closed)
+    # Count distinct normalized symbols (remove .US suffix if present)
     query = """
-        SELECT COUNT(DISTINCT s.symbol)
+        SELECT COUNT(DISTINCT 
+            CASE 
+                WHEN s.symbol LIKE '%.US' THEN SUBSTRING(s.symbol FROM 1 FOR LENGTH(s.symbol) - 3)
+                ELSE s.symbol
+            END
+        )
         FROM market_symbols s
         JOIN market_data md ON md.symbol_id = s.symbol_id
-        WHERE md.timestamp > NOW() - INTERVAL '24 hours'
+        WHERE s.is_active = true
+        AND md.timestamp > NOW() - INTERVAL '7 days'
     """
     rows = execute_query(query)
     result["symbols_with_recent_data"] = rows[0][0] if rows else 0
@@ -132,6 +150,7 @@ def fetch_data_inventory() -> pd.DataFrame:
             MAX(md.timestamp) as last_timestamp
         FROM market_symbols s
         LEFT JOIN market_data md ON md.symbol_id = s.symbol_id
+        WHERE s.is_active = true
         GROUP BY s.symbol, s.exchange
         ORDER BY s.symbol
     """
@@ -169,27 +188,28 @@ def fetch_predictions(
 
     query = """
         SELECT
-            ps.symbol,
-            ps.signal_type,
-            ps.confidence,
-            ps.entry_price,
-            ps.target_price,
-            ps.stop_loss,
-            ps.signal_timestamp,
-            ps.risk_reward_ratio,
-            ps.signal_strength
-        FROM prediction_signals ps
-        JOIN prediction_runs pr ON pr.run_id = ps.run_id
-        WHERE pr.timestamp >= %s
-          AND ps.confidence >= %s
+            s.symbol,
+            gs.signal_type,
+            gs.confidence,
+            gs.entry_price,
+            gs.target_price,
+            gs.stop_loss,
+            gs.signal_timestamp,
+            gs.risk_reward_ratio,
+            gs.signal_strength
+        FROM generated_signals gs
+        JOIN prediction_runs pr ON pr.run_id = gs.run_id
+        JOIN market_symbols s ON s.symbol_id = gs.symbol_id
+        WHERE pr.created_at >= %s
+          AND gs.confidence >= %s
     """
     params = [since, min_confidence]
 
     if symbol:
-        query += " AND ps.symbol = %s"
+        query += " AND s.symbol = %s"
         params.append(symbol)
 
-    query += " ORDER BY ps.signal_timestamp DESC LIMIT 500"
+    query += " ORDER BY gs.signal_timestamp DESC LIMIT 500"
 
     rows = execute_query(query, tuple(params))
 
@@ -318,10 +338,10 @@ def fetch_system_status() -> Dict[str, Any]:
     status: Dict[str, Any] = {}
 
     try:
-        # Database stats
+        # Database stats (count only active symbols)
         query = """
             SELECT
-                (SELECT COUNT(*) FROM market_symbols) as symbols,
+                (SELECT COUNT(*) FROM market_symbols WHERE is_active = true) as symbols,
                 (SELECT COUNT(*) FROM market_data) as data_bars,
                 (SELECT pg_size_pretty(pg_database_size(current_database()))) as db_size
         """
@@ -333,23 +353,30 @@ def fetch_system_status() -> Dict[str, Any]:
                 "size": rows[0][2],
             }
 
-        # Recent data
+        # Recent data (using 7 days to account for weekends)
+        # Count distinct normalized symbols (remove .US suffix if present)
         query = """
-            SELECT COUNT(DISTINCT s.symbol)
+            SELECT COUNT(DISTINCT 
+                CASE 
+                    WHEN s.symbol LIKE '%.US' THEN SUBSTRING(s.symbol FROM 1 FOR LENGTH(s.symbol) - 3)
+                    ELSE s.symbol
+                END
+            )
             FROM market_symbols s
             JOIN market_data md ON md.symbol_id = s.symbol_id
-            WHERE md.timestamp > NOW() - INTERVAL '24 hours'
+            WHERE s.is_active = true
+            AND md.timestamp > NOW() - INTERVAL '7 days'
         """
         rows = execute_query(query)
         status["data_coverage"] = {
             "symbols_24h": rows[0][0] if rows else 0,
         }
 
-        # Predictions
+        # Predictions (7 days - to account for weekends)
         query = """
             SELECT
-                (SELECT COUNT(*) FROM prediction_runs WHERE timestamp > NOW() - INTERVAL '24 hours') as runs_24h,
-                (SELECT COUNT(*) FROM prediction_signals ps JOIN prediction_runs pr ON pr.run_id = ps.run_id WHERE pr.timestamp > NOW() - INTERVAL '24 hours') as signals_24h
+                (SELECT COUNT(*) FROM prediction_runs WHERE created_at > NOW() - INTERVAL '7 days') as runs_24h,
+                (SELECT COUNT(*) FROM generated_signals gs JOIN prediction_runs pr ON pr.run_id = gs.run_id WHERE pr.created_at > NOW() - INTERVAL '7 days') as signals_24h
         """
         rows = execute_query(query)
         if rows:
@@ -364,6 +391,44 @@ def fetch_system_status() -> Dict[str, Any]:
         status["backtests"] = {
             "last_7_days": rows[0][0] if rows else 0,
         }
+
+        # WebSocket status (if data collection service is available)
+        try:
+            from dgas.data.collection_service import DataCollectionService
+            from dgas.config.adapter import load_settings
+            
+            settings = load_settings()
+            if settings.data_collection and settings.data_collection.use_websocket:
+                service = DataCollectionService(settings.data_collection)
+                ws_status = service.get_websocket_status()
+                if ws_status:
+                    status["websocket"] = {
+                        "enabled": True,
+                        "running": ws_status.get("running", False),
+                        "connected": ws_status.get("client_connected", False),
+                        "connections": ws_status.get("client_status", {}).get("connections", 0),
+                        "connected_count": ws_status.get("client_status", {}).get("connected", 0),
+                        "total_symbols": ws_status.get("client_status", {}).get("total_symbols", 0),
+                        "messages_received": ws_status.get("client_status", {}).get("total_messages_received", 0),
+                        "bars_buffered": ws_status.get("bars_buffered", 0),
+                        "bars_stored": ws_status.get("stats", {}).get("bars_stored", 0),
+                    }
+                else:
+                    status["websocket"] = {
+                        "enabled": True,
+                        "running": False,
+                        "connected": False,
+                    }
+            else:
+                status["websocket"] = {
+                    "enabled": False,
+                }
+        except Exception as e:
+            # WebSocket status unavailable (service not running or error)
+            status["websocket"] = {
+                "enabled": None,
+                "error": str(e),
+            }
 
         status["status"] = "healthy"
 

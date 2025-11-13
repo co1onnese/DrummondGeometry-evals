@@ -119,6 +119,12 @@ class PortfolioPositionManager:
         self._cached_equity_timestamp: datetime | None = None
         self._cached_equity_prices: Dict[str, Decimal] | None = None
 
+    def _invalidate_equity_cache(self) -> None:
+        """Invalidate equity cache when positions change."""
+        self._cached_equity = None
+        self._cached_equity_timestamp = None
+        self._cached_equity_prices = None
+
     def get_current_state(self, timestamp: datetime, prices: Dict[str, Decimal]) -> PortfolioState:
         """Get current portfolio state.
 
@@ -349,6 +355,9 @@ class PortfolioPositionManager:
 
         self.positions[symbol] = portfolio_position
         self.current_portfolio_risk += risk_amount
+
+        # Invalidate equity cache since positions changed
+        self._invalidate_equity_cache()
 
         return portfolio_position
 

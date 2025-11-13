@@ -84,6 +84,22 @@ class PredictionConfig(BaseModel):
         gt=0.0,
         description="Target price ATR multiplier",
     )
+    wait_for_fresh_data: bool = Field(
+        default=True,
+        description="Wait for data collection to complete before generating signals",
+    )
+    max_wait_minutes: int = Field(
+        default=5,
+        ge=0,
+        le=30,
+        description="Maximum time to wait for fresh data (minutes, 0 = skip if stale)",
+    )
+    freshness_threshold_minutes: int = Field(
+        default=15,
+        ge=1,
+        le=60,
+        description="Maximum data age to consider fresh (minutes)",
+    )
 
 
 class DiscordConfig(BaseModel):
@@ -165,6 +181,101 @@ class DashboardConfig(BaseModel):
     )
 
 
+class DataCollectionConfig(BaseModel):
+    """Data collection service configuration."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable data collection service",
+    )
+    interval_market_hours: str = Field(
+        default="5m",
+        description="Collection interval during market hours (9:30am-4pm ET, Mon-Fri)",
+        pattern="^(1m|5m|15m|30m|1h)$",
+    )
+    interval_after_hours: str = Field(
+        default="15m",
+        description="Collection interval after market hours",
+        pattern="^(1m|5m|15m|30m|1h)$",
+    )
+    interval_weekends: str = Field(
+        default="30m",
+        description="Collection interval on weekends",
+        pattern="^(1m|5m|15m|30m|1h)$",
+    )
+    batch_size: int = Field(
+        default=50,
+        ge=1,
+        le=200,
+        description="Number of symbols per batch",
+    )
+    max_concurrent_batches: int = Field(
+        default=1,
+        ge=1,
+        le=5,
+        description="Maximum concurrent batches (1 = sequential)",
+    )
+    delay_between_batches: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=60.0,
+        description="Delay between batches (seconds)",
+    )
+    requests_per_minute: int = Field(
+        default=80,
+        ge=1,
+        le=200,
+        description="API requests per minute limit",
+    )
+    rate_limit_buffer: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=0.5,
+        description="Rate limit safety buffer (0.1 = 10% buffer)",
+    )
+    use_websocket: bool = Field(
+        default=True,
+        description="Use WebSocket for real-time data during market hours",
+    )
+    websocket_interval: str = Field(
+        default="30m",
+        description="Interval for WebSocket bar aggregation",
+        pattern="^(1m|5m|15m|30m|1h)$",
+    )
+    max_retries: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description="Maximum retry attempts per symbol",
+    )
+    retry_delay_seconds: int = Field(
+        default=5,
+        ge=1,
+        le=60,
+        description="Initial retry delay (seconds, exponential backoff)",
+    )
+    error_threshold_pct: float = Field(
+        default=10.0,
+        ge=0.0,
+        le=100.0,
+        description="Alert threshold for error rate (percentage)",
+    )
+    log_collection_stats: bool = Field(
+        default=True,
+        description="Log detailed collection statistics",
+    )
+    track_freshness: bool = Field(
+        default=True,
+        description="Track and report data freshness",
+    )
+    health_check_interval: int = Field(
+        default=60,
+        ge=10,
+        le=300,
+        description="Health check interval (seconds)",
+    )
+
+
 class DGASConfig(BaseModel):
     """Root configuration for DGAS system."""
 
@@ -192,8 +303,12 @@ class DGASConfig(BaseModel):
         default_factory=DashboardConfig,
         description="Dashboard configuration",
     )
+    data_collection: DataCollectionConfig = Field(
+        default_factory=DataCollectionConfig,
+        description="Data collection service configuration",
+    )
 
     model_config = {
-        "extra": "forbid",  # Disallow extra fields
+        "extra": "ignore",  # Ignore extra fields (for backward compatibility with eodhd, data sections)
         "validate_assignment": True,  # Validate on assignment
     }

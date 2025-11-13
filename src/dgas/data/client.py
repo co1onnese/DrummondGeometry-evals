@@ -101,6 +101,43 @@ class EODHDClient:
             raise EODHDParsingError("unexpected response format from eod endpoint")
         return IntervalData.from_api_list(payload, "1d", symbol_override=symbol)
 
+    def fetch_live_ohlcv(
+        self,
+        symbol: str,
+        interval: str = "30m",
+    ) -> List[IntervalData]:
+        """
+        Fetch live/realtime OHLCV data for today.
+        
+        Uses EODHD's realtime endpoint for same-day data.
+        This is faster and more up-to-date than historical intraday.
+        
+        Args:
+            symbol: Stock symbol
+            interval: Data interval (1m, 5m, 15m, 30m, 1h)
+            
+        Returns:
+            List of IntervalData for today
+        """
+        params: Dict[str, Any] = {
+            "api_token": self._config.api_token,
+            "fmt": "json",
+            "interval": interval,
+        }
+        
+        # Use realtime endpoint for live data
+        path = f"real-time/{symbol}"
+        payload = self._request(path, params)
+        
+        # Realtime endpoint may return single object or list
+        if isinstance(payload, dict):
+            # Single bar - convert to list
+            payload = [payload]
+        elif not isinstance(payload, list):
+            raise EODHDParsingError("unexpected response format from realtime endpoint")
+        
+        return IntervalData.from_api_list(payload, interval, symbol_override=symbol)
+
     def list_exchange_symbols(self, exchange: str = "US") -> List[Dict[str, Any]]:
         params: Dict[str, Any] = {
             "api_token": self._config.api_token,

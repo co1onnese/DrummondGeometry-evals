@@ -127,15 +127,24 @@ def create_scatter_chart(
     Returns:
         Plotly figure
     """
-    fig = px.scatter(
-        df,
-        x=x_col,
-        y=y_col,
-        size=size_col,
-        color=color_col,
-        title=title,
-        hover_data=["symbol", "signal_type", "risk_reward_ratio"],
-    )
+    # Use size parameter only if size_col is provided
+    fig_kwargs = {
+        "x": x_col,
+        "y": y_col,
+        "color": color_col,
+        "title": title,
+        "hover_data": ["symbol", "signal_type", "risk_reward_ratio"],
+    }
+
+    if size_col and size_col in df.columns:
+        # Convert column to native Python values for Plotly
+        size_values = pd.to_numeric(df[size_col], errors="coerce").fillna(0)
+        # Scale values to reasonable marker sizes (5-20 pixels)
+        min_size, max_size = 5, 20
+        size_scaled = min_size + (size_values - size_values.min()) / (size_values.max() - size_values.min() + 0.0001) * (max_size - min_size)
+        fig_kwargs["size"] = size_scaled
+
+    fig = px.scatter(df, **fig_kwargs)
 
     fig.update_layout(height=500, hovermode="closest")
 
@@ -358,15 +367,25 @@ def create_signal_timeline(df: pd.DataFrame) -> go.Figure:
         )
         return fig
 
-    fig = px.scatter(
-        df,
-        x="signal_timestamp",
-        y="symbol",
-        color="signal_type",
-        size="signal_strength",
-        hover_data=["confidence", "risk_reward_ratio"],
-        title="Signal Timeline",
-    )
+    # Prepare kwargs for px.scatter
+    fig_kwargs = {
+        "x": "signal_timestamp",
+        "y": "symbol",
+        "color": "signal_type",
+        "hover_data": ["confidence", "risk_reward_ratio"],
+        "title": "Signal Timeline",
+    }
+
+    # Handle size parameter if signal_strength column exists
+    if "signal_strength" in df.columns:
+        # Convert column to native Python values for Plotly
+        size_values = pd.to_numeric(df["signal_strength"], errors="coerce").fillna(0)
+        # Scale values to reasonable marker sizes (5-20 pixels)
+        min_size, max_size = 5, 20
+        size_scaled = min_size + (size_values - size_values.min()) / (size_values.max() - size_values.min() + 0.0001) * (max_size - min_size)
+        fig_kwargs["size"] = size_scaled
+
+    fig = px.scatter(df, **fig_kwargs)
 
     fig.update_layout(
         height=500,

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -714,10 +718,21 @@ class PredictionEngine:
         if trading_interval is None:
             trading_interval = timeframes[1] if len(timeframes) > 1 else interval
 
-        # Step 1: Refresh market data
+        # Step 1: Check data freshness (data collection service handles updates)
+        # Note: Data refresh is now handled by the separate data collection service
+        # We only verify freshness here to warn if data is stale
         data_fetch_start = time.time()
-        updated_symbols = self._refresh_market_data(symbols, interval, errors)
+        stale_symbols = self._check_data_freshness(symbols, interval, max_age_minutes=15)
         data_fetch_ms = int((time.time() - data_fetch_start) * 1000)
+        
+        if stale_symbols:
+            logger.warning(
+                f"Stale data detected: {len(stale_symbols)} symbols have data older than 15 minutes. "
+                f"Data collection service should update data. Sample: {stale_symbols[:5]}"
+            )
+            # Add warnings to errors list
+            for symbol, age_minutes in stale_symbols[:10]:
+                errors.append(f"{symbol}: Data age {age_minutes:.1f} minutes (may be stale)")
 
         # Step 2: Recalculate indicators and generate signals
         indicator_calc_start = time.time()
@@ -857,8 +872,14 @@ class PredictionEngine:
             List of symbols that were successfully updated
         """
         from ..data.ingestion import incremental_update_intraday
+        import logging
+        logger = logging.getLogger(__name__)
 
+        logger.info(f"Refreshing market data for {len(symbols)} symbols (interval: {interval})")
         updated = []
+        total_fetched = 0
+        total_stored = 0
+        
         for symbol in symbols:
             try:
                 # Perform incremental update (fetches only recent data)
@@ -869,13 +890,68 @@ class PredictionEngine:
                     buffer_days=2,  # 2 days buffer
                 )
 
-                if summary.stored > 0 or summary.fetched > 0:
+                total_fetched += summary.fetched
+                total_stored += summary.stored
+
+                if summary.stored > 0:
                     updated.append(symbol)
+                    logger.debug(f"{symbol}: Fetched {summary.fetched} bars, stored {summary.stored} new bars")
+                elif summary.fetched > 0:
+                    logger.debug(f"{symbol}: Fetched {summary.fetched} bars, 0 new (already up to date)")
 
             except Exception as e:
-                errors.append(f"{symbol}: Data refresh failed - {str(e)}")
+                error_msg = f"{symbol}: Data refresh failed - {str(e)}"
+                errors.append(error_msg)
+                logger.warning(error_msg)
 
+        logger.info(f"Data refresh complete: {len(updated)}/{len(symbols)} symbols updated, "
+                    f"{total_fetched} bars fetched, {total_stored} new bars stored")
         return updated
+
+    def _check_data_freshness(
+        self,
+        symbols: List[str],
+        interval: str,
+        max_age_minutes: int = 15,
+    ) -> List[tuple[str, float]]:
+        """
+        Check data freshness for symbols.
+        
+        Returns list of (symbol, age_minutes) tuples for symbols with stale data.
+        
+        Args:
+            symbols: Symbols to check
+            interval: Data interval
+            max_age_minutes: Maximum age in minutes before considered stale
+            
+        Returns:
+            List of (symbol, age_minutes) tuples for stale symbols
+        """
+        from datetime import datetime, timezone
+        from ..data.repository import get_latest_timestamp, ensure_market_symbol
+        from ..db import get_connection
+        
+        stale_symbols: List[tuple[str, float]] = []
+        now = datetime.now(timezone.utc)
+        
+        with get_connection() as conn:
+            for symbol in symbols:
+                try:
+                    symbol_id = ensure_market_symbol(conn, symbol, "US")
+                    latest_ts = get_latest_timestamp(conn, symbol_id, interval)
+                    
+                    if latest_ts:
+                        age_minutes = (now - latest_ts).total_seconds() / 60.0
+                        if age_minutes > max_age_minutes:
+                            stale_symbols.append((symbol, age_minutes))
+                    else:
+                        # No data - consider stale
+                        stale_symbols.append((symbol, float("inf")))
+                except Exception as e:
+                    logger.debug(f"Error checking freshness for {symbol}: {e}")
+                    # Don't add to stale list on error, just log
+        
+        return stale_symbols
 
     def _load_market_data(
         self,

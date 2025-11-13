@@ -7,13 +7,25 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
-from enum import Enum
+from enum import Enum, IntEnum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+import requests
 import streamlit as st
+
+# Try to load .env file if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+    # Load .env file from project root
+    env_path = Path(__file__).parent.parent.parent.parent.parent / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+except ImportError:
+    pass  # python-dotenv not available, rely on environment variables
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -31,7 +43,7 @@ class NotificationType(Enum):
     SYSTEM = "system"
 
 
-class NotificationPriority(Enum):
+class NotificationPriority(IntEnum):
     """Notification priority levels."""
     LOW = 1
     MEDIUM = 2
@@ -337,6 +349,9 @@ class NotificationService:
             auto_dismiss=priority < NotificationPriority.HIGH,
         )
         self.add_notification(notification)
+        
+        # Also send to Discord if configured
+        self._send_to_discord(notification)
 
     def create_backtest_notification(self, backtest_data: Dict[str, Any]) -> None:
         """
@@ -386,6 +401,102 @@ class NotificationService:
             auto_dismiss=priority < NotificationPriority.HIGH,
         )
         self.add_notification(notification)
+        
+        # Also send to Discord if configured
+        self._send_to_discord(notification)
+
+    def _send_to_discord(self, notification: Notification) -> None:
+        """
+        Send notification to Discord if configured.
+        
+        Args:
+            notification: Notification to send
+        """
+        # Try multiple ways to get Discord credentials
+        bot_token = os.getenv("DGAS_DISCORD_BOT_TOKEN")
+        channel_id = os.getenv("DGAS_DISCORD_CHANNEL_ID")
+        
+        # If not found, try loading from .env file directly
+        if not bot_token or not channel_id:
+            try:
+                from dotenv import load_dotenv
+                # Try to find .env file
+                env_paths = [
+                    Path("/opt/DrummondGeometry-evals/.env"),
+                    Path(__file__).parent.parent.parent.parent.parent / ".env",
+                    Path.cwd() / ".env",
+                ]
+                for env_path in env_paths:
+                    if env_path.exists():
+                        load_dotenv(env_path, override=False)
+                        break
+                
+                # Try again after loading
+                bot_token = os.getenv("DGAS_DISCORD_BOT_TOKEN") or bot_token
+                channel_id = os.getenv("DGAS_DISCORD_CHANNEL_ID") or channel_id
+            except ImportError:
+                pass  # python-dotenv not available
+        
+        if not bot_token or not channel_id:
+            logger.warning("Discord not configured - bot_token or channel_id missing. Skipping Discord notification.")
+            return
+        
+        logger.info(f"Sending notification to Discord: {notification.title}")
+        try:
+            url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+            headers = {
+                "Authorization": f"Bot {bot_token}",
+                "Content-Type": "application/json"
+            }
+            
+            # Create a simple embed for the notification
+            color_map = {
+                NotificationType.INFO: 0x3498db,      # Blue
+                NotificationType.SUCCESS: 0x2ecc71,   # Green
+                NotificationType.WARNING: 0xf39c12,   # Orange
+                NotificationType.ERROR: 0xe74c3c,     # Red
+                NotificationType.SYSTEM: 0x95a5a6,    # Gray
+                NotificationType.SIGNAL: 0x9b59b6,    # Purple
+                NotificationType.PREDICTION: 0x1abc9c, # Teal
+                NotificationType.BACKTEST: 0x34495e,   # Dark blue-gray
+            }
+            
+            embed = {
+                "title": notification.title,
+                "description": notification.message,
+                "color": color_map.get(notification.type, 0x95a5a6),
+                "timestamp": notification.timestamp.isoformat(),
+                "footer": {
+                    "text": f"DGAS Dashboard - {notification.type.value.upper()}"
+                }
+            }
+            
+            # Add signal data if available
+            if notification.data and notification.type == NotificationType.SIGNAL:
+                fields = []
+                if "symbol" in notification.data:
+                    fields.append({"name": "Symbol", "value": notification.data["symbol"], "inline": True})
+                if "confidence" in notification.data:
+                    fields.append({"name": "Confidence", "value": f"{notification.data['confidence']:.1%}", "inline": True})
+                if "risk_reward_ratio" in notification.data:
+                    fields.append({"name": "R:R Ratio", "value": f"{notification.data['risk_reward_ratio']:.2f}", "inline": True})
+                if fields:
+                    embed["fields"] = fields
+            
+            payload = {"embeds": [embed]}
+            
+            response = requests.post(url, json=payload, headers=headers, timeout=10)
+            response.raise_for_status()
+            
+            result = response.json()
+            logger.info(f"Discord notification sent successfully: {notification.title} (Message ID: {result.get('id')})")
+            
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"Discord API HTTP error: {e.response.status_code} - {e.response.text[:200]}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to send Discord notification (network error): {e}")
+        except Exception as e:
+            logger.error(f"Error sending to Discord: {e}", exc_info=True)
 
     def export_notifications(self, filepath: Path) -> None:
         """

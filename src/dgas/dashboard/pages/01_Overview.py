@@ -40,7 +40,17 @@ def render() -> None:
     # Show new notifications
     show_new_notifications()
 
-    # Check data against alert rules
+    # Load data first
+    try:
+        system_overview = fetch_system_overview()
+        data_inventory = fetch_data_inventory()
+        recent_predictions = fetch_predictions(days=7)
+        recent_backtests = fetch_backtest_results(limit=5)
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
+        return
+
+    # Check data against alert rules (after data is loaded)
     try:
         if not recent_predictions.empty:
             # Check latest prediction
@@ -53,16 +63,6 @@ def render() -> None:
             check_backtest(latest_bt)
     except Exception as e:
         st.error(f"Error checking alert rules: {e}")
-
-    # Load data
-    try:
-        system_overview = fetch_system_overview()
-        data_inventory = fetch_data_inventory()
-        recent_predictions = fetch_predictions(days=7)
-        recent_backtests = fetch_backtest_results(limit=5)
-    except Exception as e:
-        st.error(f"Error loading data: {e}")
-        return
 
     # Key metrics row
     st.subheader("Key Metrics")
@@ -165,12 +165,16 @@ def render() -> None:
                     filtered_predictions["signal_type"]
                     .value_counts()
                     .reset_index()
-                    .rename(columns={"index": "Signal Type", "signal_type": "Count"})
                 )
+                # value_counts().reset_index() creates columns: [original_column_name, 'count']
+                # Use the actual column names that exist in the dataframe
+                names_col = signal_dist.columns[0]  # First column is the signal_type values
+                values_col = signal_dist.columns[1]  # Second column is the count
+                
                 fig = create_pie_chart(
                     signal_dist,
-                    names_col="Signal Type",
-                    values_col="Count",
+                    names_col=names_col,
+                    values_col=values_col,
                     title="Signal Type Distribution",
                 )
                 st.plotly_chart(fig, use_container_width=True)

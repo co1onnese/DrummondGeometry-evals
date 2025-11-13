@@ -266,9 +266,32 @@ def cached_query(ttl: int = 300, key_prefix: str = ""):
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            # Generate cache key
+            # Generate cache key - safely convert args/kwargs to strings
+            # Handle context managers and other non-serializable objects
+            def safe_str(obj):
+                """Safely convert object to string for cache key."""
+                try:
+                    # Try normal string conversion first
+                    if isinstance(obj, (str, int, float, bool, type(None))):
+                        return str(obj)
+                    # For tuples/lists, recursively convert
+                    if isinstance(obj, (tuple, list)):
+                        return f"({','.join(safe_str(item) for item in obj)})"
+                    # For dicts, convert items
+                    if isinstance(obj, dict):
+                        return f"{{{','.join(f'{k}:{safe_str(v)}' for k, v in sorted(obj.items()))}}}"
+                    # For other objects, use repr but limit length
+                    return repr(obj)[:100]
+                except Exception:
+                    # Fallback: use object id if conversion fails
+                    return f"<obj_{id(obj)}>"
+            
             cache_key = f"{key_prefix}_{func.__name__}"
-            cache_key += f"_{str(args)}_{str(sorted(kwargs.items()))}"
+            try:
+                cache_key += f"_{safe_str(args)}_{safe_str(sorted(kwargs.items()))}"
+            except Exception:
+                # Fallback: use function name and hash of args
+                cache_key += f"_{hash(args)}_{hash(tuple(sorted(kwargs.items())))}"
 
             # Try to get from cache
             cache = get_cache()

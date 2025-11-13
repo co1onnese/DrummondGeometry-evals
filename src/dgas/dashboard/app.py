@@ -11,15 +11,15 @@ from typing import NoReturn
 
 import streamlit as st
 
-# Import page modules
-from dgas.dashboard.pages import (
-    Overview,
-    Data,
-    Predictions,
-    Backtests,
-    SystemStatus,
-    CustomDashboard,
-)
+# Import page modules directly using importlib
+from importlib import import_module
+
+Overview = import_module("dgas.dashboard.pages.01_Overview")
+Data = import_module("dgas.dashboard.pages.02_Data")
+Predictions = import_module("dgas.dashboard.pages.03_Predictions")
+Backtests = import_module("dgas.dashboard.pages.04_Backtests")
+SystemStatus = import_module("dgas.dashboard.pages.05_System_Status")
+CustomDashboard = import_module("dgas.dashboard.pages.06_Custom_Dashboard")
 from dgas.dashboard.components.utils import load_dashboard_config
 from dgas.dashboard.realtime_client import (
     get_client,
@@ -103,8 +103,9 @@ def render_sidebar() -> str:
 
         st.markdown("---")
 
-        # Real-time status
+        # Real-time status (optional feature)
         st.subheader("Real-time Updates")
+        st.caption("Optional: WebSocket server not required for dashboard operation")
         render_websocket_status()
 
         st.markdown("---")

@@ -208,6 +208,7 @@ def init_websocket_script() -> str:
 def render_websocket_status() -> None:
     """
     Render WebSocket connection status in Streamlit.
+    Shows status gracefully - real-time updates are optional.
     """
     client = get_client()
     status = client.get_connection_status()
@@ -218,13 +219,15 @@ def render_websocket_status() -> None:
         if status["connected"]:
             st.success("🟢 Connected", icon="✅")
         else:
-            st.error("🔴 Disconnected", icon="❌")
+            # Show as info rather than error - real-time updates are optional
+            st.info("⚪ Real-time updates unavailable", icon="ℹ️")
+            st.caption("Using auto-refresh instead")
 
     with col2:
         st.metric(
             "Messages Received",
             status["message_count"],
-            help="Total messages received"
+            help="Total messages received via WebSocket"
         )
 
     with col3:
@@ -233,6 +236,12 @@ def render_websocket_status() -> None:
                 "Last Update",
                 status["last_message"][-8:],  # Show time only
                 help="Last message timestamp"
+            )
+        else:
+            st.metric(
+                "Update Mode",
+                "Polling",
+                help="Dashboard uses polling for updates"
             )
 
 

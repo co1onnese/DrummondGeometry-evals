@@ -4,14 +4,12 @@
 ## Project Overview
 Local-first market data ingestion and Drummond Geometry analysis toolkit implementing multi-timeframe coordination for trading signals. Production-ready system with prediction engine, real-time dashboard, CLI tools, and performance optimizations.
 
-**Phases**: (0) scaffolding, (1) data pipeline, (2) calculations & multi-timeframe, (3) backtesting, (4) prediction system, (5) dashboard, (6) optimization
 **Stack**: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI), streamlit (dashboard), apscheduler (scheduling)
 
 ---
 
-## Module Hierarchy & Goals
+## Core Package
 
-### Core Package
 **dgas/__init__.py**
 - `get_version() -> str`: Return installed package version via importlib.metadata
 
@@ -19,17 +17,16 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 - `build_parser() -> ArgumentParser`: CLI structure with subcommands (analyze, backtest, configure, data, predict, report, scheduler, status, monitor, data-report)
 - `main(argv: list[str] | None) -> int`: Route to subcommands or --version
 - `_parse_key_value_pairs(items: list[str]) -> dict[str, str]`: Parse key=value strategy params
-- Goal: CLI orchestration for all system operations
 
 **dgas/settings.py**
 - `Settings(BaseSettings)`: Pydantic config loader
   - Fields: `eodhd_api_token: str | None`, `database_url: str`, `data_dir: Path`, `eodhd_requests_per_minute: int`
 - `get_settings() -> Settings`: Cached singleton via @lru_cache
-- Goal: Centralized env-based configuration with .env support
 
 ---
 
-### Configuration System
+## Configuration System
+
 **dgas/config/schema.py**
 - `DatabaseConfig(BaseModel)`: url, pool_size, echo
 - `SchedulerConfig(BaseModel)`: symbols, cron_expression, timezone, market_hours_only
@@ -40,7 +37,6 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 - `MonitoringConfig(BaseModel)`: sla_p95_latency_ms, sla_error_rate_pct, sla_uptime_pct
 - `DashboardConfig(BaseModel)`: port, theme, auto_refresh_seconds
 - `DGASConfig(BaseModel)`: Root config combining all sub-configs
-- Goal: Typed configuration schema with validation
 
 **dgas/config/loader.py**
 - `ConfigLoader(config_path: Path | None)`: Load and merge config from multiple sources
@@ -51,34 +47,71 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
   - `save(config: DGASConfig, path: Path, format: str) -> None`: Save config to file
   - `generate_sample_config(path: Path, template: str) -> None`: Generate sample configs
 - `load_config(config_path: Path | None) -> DGASConfig`: Convenience function
-- Goal: Multi-source config loading (CLI > file > env > defaults)
 
 **dgas/config/adapter.py**
 - `UnifiedSettings(config_file: Path | None, config_overrides: dict[str, Any] | None)`: Bridge DGASConfig and legacy Settings
   - Properties: database_url, database_pool_size, scheduler_symbols, prediction_min_confidence, notifications_*, monitoring_*, dashboard_*, eodhd_api_token, data_dir, eodhd_requests_per_minute
   - `to_dict() -> dict[str, Any]`: Convert to dictionary
 - `load_settings(config_file: Path | None, **overrides: Any) -> UnifiedSettings`: Convenience function
-- Goal: Unified interface for new config files and legacy environment variables
 
 **dgas/config/validators.py**
 - `expand_env_vars_in_dict(data: dict) -> dict`: Expand ${VAR} in config values
 - `validate_config_file(path: Path) -> None`: Validate file exists and is readable
-- Goal: Config validation and environment variable expansion
 
 ---
 
-### Database Layer
+## Core Utilities
+
+**dgas/core/config_manager.py**
+- `ServerConfig`: Configuration for server resources (num_cpus, db_pool_size, batch_io_size, memory_limit_mb)
+- `get_optimal_config() -> ServerConfig`: Auto-detect optimal configuration based on system resources
+- `get_config() -> ServerConfig`: Get or create the global configuration
+
+**dgas/core/connection_pool.py**
+- `DatabaseConnectionPool(pool_size: int)`: Simple connection pool using queue
+  - `initialize() -> None`: Initialize the connection pool with connections
+  - `get_connection(timeout: float) -> Generator[Connection]`: Get connection from pool
+  - `close_all() -> None`: Close all connections
+- `get_connection_pool(pool_size: int | None) -> DatabaseConnectionPool`: Global singleton
+- `get_pooled_connection(timeout: float) -> Generator[Connection]`: Context manager for pooled connection
+
+**dgas/core/parallel_processor.py**
+- `BatchResult`: Result of processing a batch (batch_num, success, elapsed_seconds, error_msg, symbols)
+- `ParallelBatchProcessor(max_workers: int)`: Process multiple backtest batches in parallel
+  - `process_batches(batches: List[Tuple[int, List[str]]], batch_processor_func) -> List[BatchResult]`: Process batches in parallel
+- `run_backtest_batch_subprocess(batch_num: int, symbols: List[str], total_batches: int) -> BatchResult`: Worker function for subprocess execution
+
+**dgas/core/io_optimizer.py**
+- `BatchIOWriter(batch_size: int)`: Batch database writes for improved performance
+  - `add_result(result: Dict[str, Any]) -> None`: Add result to batch buffer
+  - `flush_all() -> None`: Flush all remaining results
+  - `get_stats() -> Dict[str, int]`: Get I/O statistics
+- `MemoryMonitor(memory_limit_mb: int)`: Monitor and manage memory usage
+  - `start_monitoring() -> None`: Start memory monitoring
+  - `check_memory(force_gc: bool) -> None`: Check memory and trigger GC if needed
+  - `get_stats() -> Dict[str, float]`: Get memory statistics
+- `ParallelFileWriter(max_workers: int)`: Write results to files in parallel
+  - `write_results(results: List[Dict[str, Any]], output_dir: str) -> None`: Write results in parallel
+- `optimize_database_queries() -> None`: Apply database query optimizations
+- `create_database_indexes() -> None`: Create indexes for better query performance
+- `get_optimal_batch_size(symbol_count: int, num_workers: int) -> int`: Calculate optimal batch size
+
+**dgas/utils/market_hours_filter.py**
+- `filter_to_regular_hours(bars: Sequence[IntervalData], exchange_code: str) -> List[IntervalData]`: Filter bars to regular trading hours
+- `is_during_regular_hours(timestamp: datetime, exchange_code: str) -> bool`: Check if timestamp is during regular hours
+- `get_regular_hours_stats(bars: Sequence[IntervalData], exchange_code: str) -> dict`: Get statistics about regular hours coverage
+
+---
+
+## Database Layer
+
 **dgas/db/__init__.py**
 - `get_connection() -> Iterator[psycopg.Connection]`: Context manager for PostgreSQL transactions
-- Auto-commit on success, rollback on exception, always closes
-- Goal: Transactional connection wrapper
 
 **dgas/db/migrations.py**
 - `list_migration_files() -> Iterable[Path]`: Sorted *.sql from migrations/
 - `apply_all() -> None`: Execute pending migrations sequentially
 - `main() -> None`: CLI entry for migration runner
-- Internal: `_ensure_migrations_table`, `_get_applied_versions`, `_apply_migration`
-- Goal: Sequential migration runner with schema_migrations tracking
 
 **dgas/db/persistence.py**
 - `DrummondPersistence(settings: Settings | None)`: Database persistence for calculations
@@ -88,7 +121,6 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
   - `get_pattern_events(symbol: str, interval_type: str, pattern_type: PatternType | None, start_time: datetime | None, end_time: datetime | None, limit: int) -> List[PatternEvent]`
   - `save_multi_timeframe_analysis(symbol: str, analysis: MultiTimeframeAnalysis) -> int`
   - `get_latest_multi_timeframe_analysis(symbol: str, htf_interval: str, trading_interval: str) -> dict | None`
-- Goal: CRUD operations for Drummond calculations
 
 **dgas/db/connection_pool.py**
 - `PooledConnectionManager(settings: Settings | None)`: Manages PostgreSQL connection pool
@@ -101,7 +133,6 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
   - `get_stats() -> dict[str, int]`: Pool statistics
 - `get_pool_manager() -> PooledConnectionManager`: Global singleton
 - `get_db_connection() -> Generator[psycopg.Connection, None, None]`: Convenience function
-- Goal: Connection pooling for improved performance
 
 **dgas/db/enhanced_persistence.py**
 - `OptimizedPredictionPersistence(settings: Settings | None)`: Enhanced persistence with caching and profiling
@@ -110,11 +141,9 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
   - `get_recent_signals(symbol: str | None, lookback_hours: int, min_confidence: float | None, limit: int, use_cache: bool, cache_ttl_seconds: int) -> List[dict]`
   - `get_metrics(metric_type: str | None, lookback_hours: int, aggregation_period: str | None, limit: int, use_cache: bool, cache_ttl_seconds: int) -> List[dict]`
   - `_execute_with_profiling(query_name: str, query_func: callable) -> Any`: Profile query execution
-- Goal: Performance-optimized persistence with caching and monitoring
 
 **dgas/db/query_cache.py**
 - `CacheEntry(result: Any, timestamp: float, ttl_seconds: int, hit_count: int)`: Cached query result
-  - `is_expired: bool`: Check if expired
 - `QueryCache(max_size: int)`: In-memory query result cache
   - `get(query: str, params: tuple) -> Any | None`: Get cached result
   - `set(query: str, params: tuple, result: Any, ttl_seconds: int) -> None`: Cache result
@@ -122,48 +151,38 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
   - `clear() -> int`: Clear all entries
   - `get_stats() -> dict[str, Any]`: Cache statistics
 - `CacheManager`: Manages multiple named caches
-  - `get_cache(name: str) -> QueryCache | None`: Get or create named cache
-  - `clear_all() -> None`: Clear all caches
 - `get_cache_manager() -> CacheManager`: Global singleton
-- Goal: Query result caching to reduce database load
 
 **dgas/db/performance_monitor.py**
-- `QueryMetrics(query: str, execution_time_ms: float, row_count: int, success: bool, error_message: str | None)`: Query performance metrics
+- `QueryMetrics`: Query performance metrics (query, execution_time_ms, row_count, success, error_message)
 - `PerformanceMonitor`: Tracks query performance
   - `record_query(query: str, execution_time_ms: float, row_count: int, success: bool, error_message: str | None) -> None`
   - `get_summary(lookback_minutes: int) -> dict[str, Any]`: Aggregate statistics
   - `get_slow_queries(limit: int) -> List[QueryMetrics]`: Find slowest queries
 - `profile_query(monitor: PerformanceMonitor, query_name: str)`: Decorator for query profiling
 - `get_performance_monitor() -> PerformanceMonitor`: Global singleton
-- Goal: Query performance tracking and optimization
 
 **dgas/db/optimizer.py**
-- Database query optimization utilities
-- Goal: Query optimization and index recommendations
+- `DatabaseOptimizer`: Database query optimization utilities
+- `get_optimizer() -> DatabaseOptimizer`: Global singleton
 
-**dgas/migrations/001_initial_schema.sql**: Core schema (market_symbols, market_data, pldot_calculations, envelope_bands, drummond_lines, market_state, trading_signals, backtest_results, backtest_trades)
-**dgas/migrations/002_enhanced_states_patterns.sql**: Enhanced states and patterns (market_states_v2, pattern_events, multi_timeframe_analysis, confluence_zones)
-**dgas/migrations/003_prediction_system.sql**: Prediction tables (prediction_runs, generated_signals, prediction_metrics, scheduler_state)
-**dgas/migrations/004_exchange_calendar.sql**: Trading calendar (exchanges, market_holidays, trading_days)
+**Migrations**: 001_initial_schema.sql, 002_enhanced_states_patterns.sql, 003_prediction_system.sql, 004_exchange_calendar.sql
 
 ---
 
-### Data Ingestion & Quality
+## Data Ingestion & Quality
+
 **dgas/data/models.py**
 - `IntervalData(BaseModel)`: Immutable OHLCV bar
   - Fields: symbol, exchange, timestamp (UTC), interval, open/high/low/close (Decimal), adjusted_close, volume (int)
-  - Validators: `_parse_timestamp`, `_to_decimal`, `_to_int`
   - Factories: `from_api_record(record: Dict, interval: str, symbol_override: str | None) -> IntervalData`, `from_api_list(records: Iterable[Dict], interval: str, symbol_override: str | None) -> List[IntervalData]`
-- Goal: Normalized representation of market bars with type safety
 
 **dgas/data/errors.py**
 - Exceptions: `EODHDError` (base), `EODHDAuthError`, `EODHDRateLimitError`, `EODHDRequestError`, `EODHDParsingError`
-- Goal: Typed exception hierarchy for API failures
 
 **dgas/data/rate_limiter.py**
 - `RateLimiter(max_calls: int, period: float, now_func: Callable | None, sleep_func: Callable | None)`
   - `acquire() -> None`: Block until call permitted (token bucket)
-- Goal: Client-side throttling to respect EODHD rate limits
 
 **dgas/data/client.py**
 - `EODHDConfig(api_token, base_url, requests_per_minute, timeout, max_retries, session)`
@@ -173,16 +192,11 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
   - `fetch_eod(symbol: str, start: str | None, end: str | None) -> List[IntervalData]`
   - `list_exchange_symbols(exchange: str) -> List[Dict]`
   - `close() -> None`
-- Helpers: `_coerce_time_param` (epoch seconds), `_coerce_date_param` (ISO date)
-- Goal: HTTP client with retries, rate limiting, auth, error mapping
 
 **dgas/data/quality.py**
-- `DataQualityReport(symbol, interval, total_bars, duplicate_count, gap_count, is_chronological, notes)`
-  - `to_dict() -> dict`
-- `analyze_intervals(Sequence[IntervalData]) -> DataQualityReport`: Validate completeness, chronology, duplicates
+- `DataQualityReport`: Validate completeness, chronology, duplicates
+- `analyze_intervals(Sequence[IntervalData]) -> DataQualityReport`: Validate data quality
 - `summarize_reports(Iterable[DataQualityReport]) -> dict`: Aggregate quality metrics
-- `INTERVAL_SECONDS` map for gap detection
-- Goal: Validate data quality in ingested data
 
 **dgas/data/repository.py**
 - `ensure_market_symbol(conn: Connection, symbol: str, exchange: str, **metadata) -> int`: Upsert symbol, return symbol_id
@@ -191,200 +205,242 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 - `ensure_symbols_bulk(conn: Connection, symbols: Iterable[tuple[str, str]]) -> dict[str, int]`: Batch symbol creation
 - `get_symbol_id(conn: Connection, symbol: str) -> int | None`: Look up registered symbols
 - `fetch_market_data(conn: Connection, symbol: str, interval: str, *, start: datetime | None = None, end: datetime | None = None, limit: int | None = None) -> list[IntervalData]`: Chronological OHLCV retrieval
-- Goal: Database CRUD operations for symbols and OHLCV bars
 
 **dgas/data/ingestion.py**
-- `IngestionSummary(symbol, interval, fetched, stored, quality, start, end)`
+- `IngestionSummary`: Symbol, interval, fetched, stored, quality, start, end
 - `backfill_intraday(symbol: str, *, exchange: str, start_date: str, end_date: str, interval: str, client: EODHDClient | None) -> IngestionSummary`
 - `incremental_update_intraday(symbol: str, *, exchange: str, interval: str, buffer_days: int, default_start: str | None, client: EODHDClient | None) -> IngestionSummary`
 - `backfill_many(symbols: Sequence[tuple[str, str]], *, start_date: str, end_date: str, interval: str, client: EODHDClient | None) -> List[IngestionSummary]`
-- Helper: `_client_context(client | None)`: Manage client lifecycle
-- Goal: Orchestrate historical backfill and incremental updates with quality checks
 
 **dgas/data/exchange_calendar.py**
 - `ExchangeCalendar(settings, use_cache)`: EODHD exchange API integration
   - `fetch_exchange_details(exchange_code: str, from_date: str, to_date: str) -> dict`: Fetch exchange metadata
-  - `sync_exchange_calendar(exchange_code: str, force_refresh: bool) -> None`: Sync calendar to database (6 months back/forward)
+  - `sync_exchange_calendar(exchange_code: str, force_refresh: bool) -> None`: Sync calendar to database
   - `is_trading_day(exchange_code: str, check_date: datetime) -> bool`: Check if date is trading day
-  - `get_trading_hours(exchange_code: str, check_date: datetime) -> dict`: Get market open/close times including half-days
-- Goal: Database-backed trading calendar from EODHD
+  - `get_trading_hours(exchange_code: str, check_date: datetime) -> dict`: Get market open/close times
 
 ---
 
-### Drummond Geometry Calculations
+## Drummond Geometry Calculations
+
 **dgas/calculations/pldot.py**
-- `PLDotSeries(timestamp, value, projected_timestamp, projected_value, slope, displacement)`: Frozen dataclass
+- `PLDotSeries`: Frozen dataclass (timestamp, value, projected_timestamp, projected_value, slope, displacement)
 - `PLDotCalculator(displacement: int = 1)`
   - `from_intervals(Sequence[IntervalData]) -> List[PLDotSeries]`: 3-period MA of (high+low+close)/3, projected forward
-- Goal: Compute PLdot (Predicted Line dot) with forward projection
 
 **dgas/calculations/envelopes.py**
-- `EnvelopeSeries(timestamp, center, upper, lower, width, position, method)`: Frozen dataclass
+- `EnvelopeSeries`: Frozen dataclass (timestamp, center, upper, lower, width, position, method)
 - `EnvelopeCalculator(method: str = "pldot_range", period: int = 3, multiplier: float = 1.5, percent: float = 0.02)`
-  - Methods: "pldot_range" (Drummond 3-period std, DEFAULT), "atr" (ATR-based), "percentage" (fixed %)
+  - Methods: "pldot_range" (Drummond 3-period std), "atr" (ATR-based), "percentage" (fixed %)
   - `from_intervals(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries]) -> List[EnvelopeSeries]`
-- Goal: Dynamic bands around PLdot using PLdot volatility (Drummond method)
 
 **dgas/calculations/drummond_lines.py**
-- `DrummondLine(start_timestamp, end_timestamp, start_price, end_price, projected_timestamp, projected_price, slope, line_type)`: Frozen dataclass
-- `DrummondZone(center_price, lower_price, upper_price, line_type, strength)`: Frozen dataclass
+- `DrummondLine`: Frozen dataclass (start_timestamp, end_timestamp, start_price, end_price, projected_timestamp, projected_price, slope, line_type)
+- `DrummondZone`: Frozen dataclass (center_price, lower_price, upper_price, line_type, strength)
 - `DrummondLineCalculator(projection_gap: int = 1)`
-  - `from_intervals(Sequence[IntervalData]) -> List[DrummondLine]`: Generate support (lows) and resistance (highs) lines per two-bar pairs
-- `aggregate_zones(lines: Iterable[DrummondLine], tolerance: float = 0.5) -> List[DrummondZone]`: Cluster nearby lines by projected_price
-- Goal: Two-bar support/resistance projection and zone aggregation
+  - `from_intervals(Sequence[IntervalData]) -> List[DrummondLine]`: Generate support/resistance lines per two-bar pairs
+- `aggregate_zones(lines: Iterable[DrummondLine], tolerance: float = 0.5) -> List[DrummondZone]`: Cluster nearby lines
 
 **dgas/calculations/states.py**
 - `MarketState(Enum)`: TREND, CONGESTION_ENTRANCE, CONGESTION_ACTION, CONGESTION_EXIT, REVERSAL
 - `TrendDirection(Enum)`: UP, DOWN, NEUTRAL
-- `StateSeries(timestamp, state, trend_direction, bars_in_state, previous_state, pldot_slope_trend, confidence, state_change_reason)`: Frozen dataclass
+- `StateSeries`: Frozen dataclass (timestamp, state, trend_direction, bars_in_state, previous_state, pldot_slope_trend, confidence, state_change_reason)
 - `MarketStateClassifier(slope_threshold: float = 0.0001)`
-  - `classify(intervals: Sequence[IntervalData], pldot_series: Sequence[PLDotSeries]) -> List[StateSeries]`
-  - Applies Drummond 3-bar rule: 3 consecutive closes above/below PLdot = trend, alternating = congestion
-- Goal: Classify market states with confidence scores and trend direction
+  - `classify(intervals: Sequence[IntervalData], pldot_series: Sequence[PLDotSeries]) -> List[StateSeries]`: Applies Drummond 3-bar rule
 
 **dgas/calculations/patterns.py**
 - `PatternType(Enum)`: PLDOT_PUSH, PLDOT_REFRESH, EXHAUST, C_WAVE, CONGESTION_OSCILLATION
-- `PatternEvent(pattern_type, direction, start_timestamp, end_timestamp, strength)`: Frozen dataclass
-- Functions:
-  - `detect_pldot_push(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries]) -> List[PatternEvent]`: 3+ bars where close and PLdot slope align
-  - `detect_pldot_refresh(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries], tolerance: float = 0.1) -> List[PatternEvent]`: Price far from PLdot then returns
-  - `detect_exhaust(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries], envelopes: Sequence[EnvelopeSeries], extension_threshold: float = 2.0) -> List[PatternEvent]`: Price extends beyond envelope then reverses
-  - `detect_c_wave(envelopes: Sequence[EnvelopeSeries], pldot: Sequence[PLDotSeries] | None, intervals: Sequence[IntervalData] | None) -> List[PatternEvent]`: 3+ bars at envelope extremes (position >= 0.9 or <= 0.1)
-  - `detect_congestion_oscillation(envelopes: Sequence[EnvelopeSeries]) -> List[PatternEvent]`: 4+ bars oscillating in middle envelope region (0.2-0.8)
-- Goal: Detect Drummond Geometry pattern events
+- `PatternEvent`: Frozen dataclass (pattern_type, direction, start_timestamp, end_timestamp, strength)
+- `detect_pldot_push(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries]) -> List[PatternEvent]`: 3+ bars where close and PLdot slope align
+- `detect_pldot_refresh(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries], tolerance: float = 0.1) -> List[PatternEvent]`: Price far from PLdot then returns
+- `detect_exhaust(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries], envelopes: Sequence[EnvelopeSeries], extension_threshold: float = 2.0) -> List[PatternEvent]`: Price extends beyond envelope then reverses
+- `detect_c_wave(envelopes: Sequence[EnvelopeSeries], pldot: Sequence[PLDotSeries] | None, intervals: Sequence[IntervalData] | None) -> List[PatternEvent]`: 3+ bars at envelope extremes
+- `detect_congestion_oscillation(envelopes: Sequence[EnvelopeSeries]) -> List[PatternEvent]`: 4+ bars oscillating in middle envelope region
 
 **dgas/calculations/multi_timeframe.py**
 - `TimeframeType(Enum)`: HIGHER, TRADING, LOWER
-- `TimeframeData(timeframe, classification, pldot_series, envelope_series, state_series, pattern_events, drummond_zones)`: Frozen dataclass
-- `PLDotOverlay(timestamp, htf_timeframe, htf_pldot_value, htf_slope, ltf_timeframe, ltf_pldot_value, distance_percent, position)`: Frozen dataclass
-- `ConfluenceZone(level, upper_bound, lower_bound, strength, timeframes, zone_type, first_touch, last_touch, weighted_strength, sources, volatility)`: Frozen dataclass
-- `TimeframeAlignment(timestamp, htf_state, htf_direction, htf_confidence, trading_tf_state, trading_tf_direction, trading_tf_confidence, alignment_score, alignment_type, trade_permitted)`: Frozen dataclass
-- `MultiTimeframeAnalysis(timestamp, htf_timeframe, trading_timeframe, ltf_timeframe, htf_trend, htf_trend_strength, trading_tf_trend, alignment, pldot_overlay, confluence_zones, htf_patterns, trading_tf_patterns, pattern_confluence, signal_strength, risk_level, recommended_action)`: Frozen dataclass
+- `TimeframeData`: Frozen dataclass (timeframe, classification, pldot_series, envelope_series, state_series, pattern_events, drummond_zones)
+- `PLDotOverlay`: Frozen dataclass (timestamp, htf_timeframe, htf_pldot_value, htf_slope, ltf_timeframe, ltf_pldot_value, distance_percent, position)
+- `ConfluenceZone`: Frozen dataclass (level, upper_bound, lower_bound, strength, timeframes, zone_type, first_touch, last_touch, weighted_strength, sources, volatility)
+- `TimeframeAlignment`: Frozen dataclass (timestamp, htf_state, htf_direction, htf_confidence, trading_tf_state, trading_tf_direction, trading_tf_confidence, alignment_score, alignment_type, trade_permitted)
+- `MultiTimeframeAnalysis`: Frozen dataclass (timestamp, htf_timeframe, trading_timeframe, ltf_timeframe, htf_trend, htf_trend_strength, trading_tf_trend, alignment, pldot_overlay, confluence_zones, htf_patterns, trading_tf_patterns, pattern_confluence, signal_strength, risk_level, recommended_action)
 - `MultiTimeframeCoordinator(htf_timeframe: str, trading_timeframe: str, ltf_timeframe: str | None, confluence_tolerance_pct: float = 0.5, alignment_threshold: float = 0.6)`
   - `analyze(htf_data: TimeframeData, trading_tf_data: TimeframeData, ltf_data: TimeframeData | None, target_timestamp: datetime | None) -> MultiTimeframeAnalysis`
-  - Coordinates HTF trend filter, PLdot overlay, confluence zones, state alignment, pattern confluence
-  - Calculates signal strength (0.0-1.0) and recommends action (long/short/wait/reduce)
-- Goal: Multi-timeframe coordination - core Drummond methodology (HTF defines trend, trading TF provides entries)
 
 **dgas/calculations/timeframe_builder.py**
-- `build_timeframe_data(intervals: Sequence[IntervalData], timeframe: str, classification: TimeframeType) -> TimeframeData`
-  - Constructs complete TimeframeData with all indicators (PLdot, envelopes, states, patterns, Drummond zones)
-- Goal: Convenience function to build complete timeframe analysis
+- `build_timeframe_data(intervals: Sequence[IntervalData], timeframe: str, classification: TimeframeType) -> TimeframeData`: Construct complete TimeframeData with all indicators
 
 **dgas/calculations/cache.py**
-- `CacheKey(calculation_type: str, symbol: str, timeframe: str, parameters: dict, data_hash: str)`: Cache key representation
-  - `to_string() -> str`: Convert to hash string
-- `CachedResult(result: Any, timestamp: float, ttl_seconds: int, hit_count: int, computation_time_ms: float)`: Cached calculation result
-  - `is_expired: bool`, `age_seconds: float`
+- `CacheKey`: Cache key representation (calculation_type, symbol, timeframe, parameters, data_hash)
+- `CachedResult`: Cached calculation result (result, timestamp, ttl_seconds, hit_count, computation_time_ms)
 - `CalculationCache(max_size: int, default_ttl_seconds: int)`: Specialized cache for calculations
-  - `get(key: CacheKey) -> Any | None`: Get cached result
-  - `set(key: CacheKey, result: Any, ttl_seconds: int | None) -> None`: Cache result
-  - `invalidate(key: CacheKey) -> None`: Remove entry
-  - `invalidate_by_pattern(pattern: str) -> int`: Remove matching entries
-  - `clear_expired() -> int`: Remove expired entries
-  - `clear() -> int`: Clear all entries
-  - `get_stats() -> dict[str, Any]`: Cache statistics
+  - `get(key: CacheKey) -> Any | None`, `set(key: CacheKey, result: Any, ttl_seconds: int | None) -> None`, `invalidate(key: CacheKey) -> None`, `clear_expired() -> int`, `get_stats() -> dict[str, Any]`
 - `get_calculation_cache() -> CalculationCache`: Global singleton
-- Goal: Calculation result caching for performance optimization
+- `CachedPLDotCalculator`, `CachedEnvelopeCalculator`: Cached calculator wrappers
 
 **dgas/calculations/cache_manager.py**
-- `InvalidationRule(pattern: str, trigger: str, ttl_seconds: int, max_entries: int | None)`: Cache invalidation rule
+- `InvalidationRule`: Cache invalidation rule (pattern, trigger, ttl_seconds, max_entries)
 - `CacheInvalidationManager(cache: CalculationCache | None)`: Manages intelligent cache invalidation
-  - `add_rule(rule: InvalidationRule) -> None`
-  - `add_time_based_rule(pattern: str, ttl_seconds: int) -> None`
-  - `add_data_change_rule(pattern: str, max_entries: int) -> None`
-  - `invalidate_by_pattern(pattern: str) -> int`: Manual invalidation
-  - `invalidate_expired() -> int`: Remove expired entries
-  - `cleanup() -> dict[str, int]`: Run periodic cleanup
-  - `should_invalidate(cache_key: str, last_updated: float) -> bool`: Check if should invalidate
-  - `register_data_update(symbol: str, timeframe: str) -> None`: Invalidate on data update
-  - `get_cache_stats() -> dict[str, Any]`: Comprehensive statistics
-- `DataUpdateListener(invalidation_manager: CacheInvalidationManager | None)`: Listener for data updates
-  - `on_data_ingested(symbol: str, timeframe: str, bars_count: int, latest_timestamp: datetime) -> None`
-- `invalidate_calculation_cache(calculation_type: str, symbol: str | None, timeframe: str | None) -> int`: Convenience function
-- `invalidate_all_caches() -> int`: Clear all caches
+  - `add_rule(rule: InvalidationRule) -> None`, `invalidate_by_pattern(pattern: str) -> int`, `register_data_update(symbol: str, timeframe: str) -> None`
+- `DataUpdateListener`: Listener for data updates
 - `get_invalidation_manager() -> CacheInvalidationManager`: Global singleton
-- Goal: Intelligent cache invalidation strategies
 
 **dgas/calculations/profiler.py**
-- `CalculationMetrics(calculation_type: str, symbol: str, timeframe: str, execution_time_ms: float, success: bool, timestamp: float, cache_hit: bool)`: Calculation metrics
+- `CalculationMetrics`: Calculation metrics (calculation_type, symbol, timeframe, execution_time_ms, success, timestamp, cache_hit)
 - `CalculationProfiler`: Profile Drummond geometry calculations
-  - `record_calculation(calculation_type: str, symbol: str, timeframe: str, execution_time_ms: float, success: bool, cache_hit: bool) -> None`
-  - `get_summary() -> dict[str, Any]`: Aggregate statistics
-  - `get_slow_calculations(limit: int) -> List[CalculationMetrics]`: Find slowest operations
-  - `reset() -> None`: Clear metrics
+  - `record_calculation(...) -> None`, `get_summary() -> dict[str, Any]`, `get_slow_calculations(limit: int) -> List[CalculationMetrics]`
 - `get_calculation_profiler() -> CalculationProfiler`: Global singleton
-- Goal: Calculation performance profiling and optimization
 
 **dgas/calculations/optimized_coordinator.py**
 - `OptimizedTimeframeData`: TimeframeData with pre-computed indexes for fast lookups
   - `get_state_at_timestamp(timestamp: datetime) -> StateSeries | None`: Binary search lookup
   - `get_pldot_at_timestamp(timestamp: datetime) -> PLDotSeries | None`: Binary search lookup
   - `get_envelope_at_timestamp(timestamp: datetime) -> EnvelopeSeries | None`: Binary search lookup
-  - `get_recent_envelopes(timestamp: datetime, count: int) -> List[EnvelopeSeries]`: Binary search
-- `OptimizedMultiTimeframeCoordinator`: Performance-optimized coordinator
-  - Extends `MultiTimeframeCoordinator` with caching, binary search, memoization
+- `OptimizedMultiTimeframeCoordinator`: Performance-optimized coordinator with caching, binary search, memoization
   - `analyze(...) -> MultiTimeframeAnalysis`: Optimized analysis with profiling
   - `clear_cache() -> None`: Clear analysis cache
-  - `_detect_confluence_zones(...) -> List[ConfluenceZone]`: Optimized clustering (O(n log n) vs O(n²))
-- Goal: Performance-optimized multi-timeframe coordination (<200ms target)
 
 **dgas/calculations/benchmarks.py**
-- Benchmarking utilities for calculation performance
-- Goal: Performance benchmarking and validation
+- `BenchmarkResult`: Benchmark result (name, execution_time_ms, memory_mb, success, error)
+- `BenchmarkSuite`: Collection of benchmarks
+- `BenchmarkRunner`: Run benchmarks and collect results
+- `run_standard_benchmarks() -> Dict[str, Any]`: Run standard benchmark suite
 
 ---
 
-### Backtesting Engine
+## Backtesting Engine
+
 **dgas/backtesting/entities.py**
-- `SimulationConfig`, `Signal`, `Position`, `Trade`, `PortfolioSnapshot`, `BacktestResult`: Immutable dataclasses
-- Goal: Common data structures for engine, metrics, persistence, reporting
+- `PositionSide(Enum)`: LONG, SHORT
+- `SignalAction(Enum)`: ENTER_LONG, ENTER_SHORT, EXIT_LONG, EXIT_SHORT, HOLD
+- `Signal`: Dataclass (symbol, action, timestamp, price, metadata)
+- `Position`: Dataclass (symbol, side, quantity, entry_price, entry_time, entry_commission, stop_loss, take_profit, confidence, notes)
+- `Trade`: Dataclass (symbol, side, quantity, entry_time, exit_time, entry_price, exit_price, gross_profit, net_profit, commission_paid)
+- `PortfolioSnapshot`: Dataclass (timestamp, equity, cash)
+- `SimulationConfig`: Dataclass (initial_capital, commission_rate, slippage_bps, max_positions, risk_per_trade_pct)
+- `BacktestResult`: Dataclass (config, symbol, trades, equity_curve, starting_capital, ending_capital, start_date, end_date, total_bars, metadata)
 
 **dgas/backtesting/data_loader.py**
+- `BacktestBar`: Dataclass (timestamp, open, high, low, close, volume)
+- `BacktestDataset`: Dataclass (symbol, interval, bars, indicator_snapshots)
 - `load_ohlcv(symbol, interval, *, start=None, end=None, limit=None, conn=None) -> list[IntervalData]`: Fetch chronological OHLCV bars
 - `load_dataset(symbol, interval, *, start=None, end=None, include_indicators=True, limit=None, conn=None) -> BacktestDataset`: Bundle bars plus optional indicator snapshots
-- Goal: Provide deterministic, ready-to-simulate datasets
 
 **dgas/backtesting/engine.py**
 - `SimulationEngine(SimulationConfig | None)`: Deterministic execution core
-  - Handles order sizing, commission/slippage, position management, equity curve tracking, forced liquidation
-- `run(dataset: BacktestDataset, strategy: BaseStrategy) -> BacktestResult`: Execute strategy signals bar-by-bar
-- Goal: Reusable simulation kernel for all strategies
+  - `run(dataset: BacktestDataset, strategy: BaseStrategy) -> BacktestResult`: Execute strategy signals bar-by-bar
+
+**dgas/backtesting/portfolio_data_loader.py**
+- `SymbolDataBundle`: Frozen dataclass (symbol, bars, bar_count)
+- `PortfolioTimestep`: Frozen dataclass (timestamp, bars: dict[str, IntervalData], symbols_present: set[str])
+- `PortfolioDataLoader(regular_hours_only: bool, exchange_code: str)`: Load and synchronize market data for portfolio-level backtesting
+  - `load_portfolio_data(symbols: Sequence[str], interval: str, start: datetime | None, end: datetime | None) -> dict[str, SymbolDataBundle]`: Load data for all symbols
+  - `create_synchronized_timeline(bundles: dict[str, SymbolDataBundle]) -> List[PortfolioTimestep]`: Create synchronized timeline across symbols
+  - `get_data_summary(bundles: dict[str, SymbolDataBundle]) -> dict`: Get summary statistics
+
+**dgas/backtesting/portfolio_engine.py**
+- `PortfolioBacktestConfig`: Dataclass (initial_capital, risk_per_trade_pct, max_positions, max_portfolio_risk_pct, commission_rate, slippage_bps, regular_hours_only, exchange_code, max_signals_per_bar, allow_short, htf_interval, trading_interval, min_signal_confidence, confidence_scaling_enabled)
+- `PortfolioBacktestResult`: Dataclass (config, symbols, trades, equity_curve, starting_capital, ending_capital, ending_equity, start_date, end_date, total_bars, metadata)
+- `PortfolioBacktestEngine(config: PortfolioBacktestConfig | None, strategy: BaseStrategy | None)`: Main portfolio backtesting engine
+  - `run(symbols: List[str], interval: str, start: datetime | None, end: datetime | None) -> PortfolioBacktestResult`: Run portfolio backtest across multiple symbols
+  - `_process_timestep(timestep: PortfolioTimestep, idx: int, total: int) -> None`: Process single timestamp across all symbols
+  - `_generate_entry_signals(timestep: PortfolioTimestep, portfolio_state: PortfolioState) -> List[RankedSignal]`: Generate entry signals for all symbols
+  - `_execute_entry_signal(ranked_signal: RankedSignal, timestep: PortfolioTimestep) -> None`: Execute entry signal
+  - `_check_exits(timestep: PortfolioTimestep, current_prices: Dict[str, Decimal]) -> None`: Check and execute exits on existing positions
+
+**dgas/backtesting/portfolio_position_manager.py**
+- `PortfolioPosition`: Dataclass (position: Position, risk_amount: Decimal, stop_loss: Decimal | None, target: Decimal | None, max_adverse_excursion: Decimal, max_favorable_excursion: Decimal, metadata: Dict)
+- `PortfolioState`: Dataclass (timestamp, cash, positions: Dict[str, PortfolioPosition], total_equity, total_position_value, available_capital)
+- `PortfolioPositionManager(initial_capital, max_positions, max_portfolio_risk_pct, risk_per_trade_pct, commission_rate, slippage_bps)`: Manage positions across multiple symbols with shared capital
+  - `get_current_state(timestamp: datetime, prices: Dict[str, Decimal]) -> PortfolioState`: Get current portfolio state
+  - `can_open_position(symbol: str, risk_amount: Decimal) -> tuple[bool, str | None]`: Check if new position can be opened
+  - `calculate_position_size(symbol: str, entry_price: Decimal, stop_loss: Decimal, direction: int, current_prices: Dict[str, Decimal] | None) -> tuple[Decimal, Decimal]`: Calculate position size based on portfolio risk
+  - `open_position(symbol: str, side: PositionSide, quantity: Decimal, entry_price: Decimal, entry_time: datetime, stop_loss: Decimal | None, target: Decimal | None, metadata: Dict) -> PortfolioPosition`: Open new position
+  - `close_position(symbol: str, exit_price: Decimal, exit_time: datetime) -> Trade`: Close existing position
+  - `update_positions(timestamp: datetime, prices: Dict[str, Decimal]) -> None`: Update all positions with current prices
+
+**dgas/backtesting/portfolio_indicator_calculator.py**
+- `HTFDataCache`: Dataclass (symbol, interval, bars, start_date, end_date)
+- `PortfolioIndicatorCalculator(htf_interval: str, trading_interval: str)`: Calculate indicators on-the-fly for portfolio backtesting
+  - `load_htf_data_for_symbol(symbol: str, start: datetime, end: datetime) -> None`: Pre-load higher timeframe data
+  - `calculate_indicators(symbol: str, current_bar: IntervalData, historical_bars: Sequence[IntervalData]) -> Dict[str, Any]`: Calculate multi-timeframe indicators
+  - `preload_htf_data_for_portfolio(symbols: List[str], start: datetime, end: datetime) -> None`: Pre-load HTF data for all symbols
+  - `get_cache_stats() -> Dict[str, Any]`: Get statistics about cached HTF data
+
+**dgas/backtesting/signal_ranker.py**
+- `RankingCriteria(Enum)`: SIGNAL_STRENGTH, RISK_REWARD_RATIO, CONFLUENCE, TREND_ALIGNMENT, VOLATILITY
+- `RankedSignal`: Dataclass (symbol, signal, score, entry_price, stop_loss, target, risk_amount, metadata)
+- `SignalRanker(criteria_weights, min_risk_reward, max_correlated_positions)`: Rank and prioritize trading signals
+  - `rank_signals(signals: List[RankedSignal], existing_positions: Dict[str, Any] | None) -> List[RankedSignal]`: Rank signals by composite score
+  - `select_top_signals(ranked_signals: List[RankedSignal], max_signals: int, min_score: Decimal | None) -> List[RankedSignal]`: Select top N signals
+  - `group_by_direction(signals: List[RankedSignal]) -> Dict[str, List[RankedSignal]]`: Group signals by direction
+
+**dgas/backtesting/signal_evaluator.py**
+- `SignalPrediction`: Dataclass (signal_id, symbol, signal_timestamp, signal_type, predicted_entry, predicted_stop_loss, predicted_target, confidence, signal_strength)
+- `SignalOutcome`: Dataclass (signal_id, actual_entry, actual_exit, actual_entry_time, actual_exit_time, trade_executed, trade_id, pnl, hit_stop_loss, hit_target, exit_reason)
+- `SignalAccuracyMetrics`: Dataclass (total_signals, executed_signals, winning_signals, losing_signals, win_rate, avg_confidence_winning, avg_confidence_losing, avg_confidence_all, signals_by_type, win_rate_by_type, win_rate_by_confidence_bucket)
+- `SignalEvaluator()`: Evaluate signal accuracy by comparing predictions to actual outcomes
+  - `register_signal(signal: GeneratedSignal) -> None`: Register a predicted signal
+  - `register_trade(trade: Trade, signal_id: str | None) -> None`: Register a completed trade and match it to a signal
+  - `calculate_metrics() -> SignalAccuracyMetrics`: Calculate accuracy metrics
+
+**dgas/backtesting/execution/trade_executor.py**
+- `TradeExecutionResult`: Dataclass (trade, new_position, cash_change, commission_paid)
+- `BaseTradeExecutor(commission_rate, slippage_bps)`: Base class for trade execution with shared logic
+  - `apply_slippage(price: Decimal, side: PositionSide, *, is_entry: bool) -> Decimal`: Apply slippage to a price
+  - `compute_commission(quantity: Decimal, price: Decimal) -> Decimal`: Calculate commission
+  - `calculate_gross_profit(position: Position, exit_price: Decimal) -> Decimal`: Calculate gross profit/loss
+  - `calculate_net_profit(position: Position, exit_price: Decimal, exit_commission: Decimal) -> Decimal`: Calculate net profit/loss after commissions
+  - `normalize_quantity(quantity: Decimal) -> Decimal`: Normalize quantity to valid step size
+  - `open_position(symbol: str, side: PositionSide, quantity: Decimal, entry_price: Decimal, entry_time: datetime, metadata: dict | None, stop_loss: Decimal | None, take_profit: Decimal | None) -> tuple[Position, Decimal]`: Open a new position
+  - `close_position(position: Position, exit_price: Decimal, exit_time: datetime) -> Trade`: Close an existing position
+
+**dgas/backtesting/indicator_loader.py**
+- `load_indicators_from_db(symbol: str, interval: str, timestamp: datetime, conn: Connection | None) -> dict[str, Any]`: Load pre-computed indicators from database
+- `load_indicators_batch(symbols: List[str], interval: str, timestamps: List[datetime], conn: Connection | None) -> Dict[str, Dict[datetime, dict]]`: Load indicators for multiple symbols/timestamps
 
 **dgas/backtesting/strategies/base.py**
-- `StrategyConfig` (pydantic), `StrategyContext`, `BaseStrategy`, `rolling_history()` helper deque
-- Goal: Pluggable strategy framework
+- `StrategyConfig`: Pydantic base model for strategy configuration
+- `StrategyContext`: Dataclass (symbol, bar, position, cash, equity, indicators, history)
+- `BaseStrategy`: Abstract base class for trading strategies
+  - `prepare(bars: Sequence[IntervalData]) -> None`: Prepare strategy with historical data
+  - `on_bar(context: StrategyContext) -> Iterable[Signal]`: Generate signals for current bar
+- `rolling_history() -> deque`: Helper function for rolling history
 
 **dgas/backtesting/strategies/multi_timeframe.py**
-- `MultiTimeframeStrategy` and config: Simple momentum-style placeholder matching CLI default
-- Goal: Multi-timeframe strategy implementation
+- `MultiTimeframeStrategyConfig(StrategyConfig)`: Configuration for multi-timeframe strategy
+- `MultiTimeframeStrategy(BaseStrategy)`: Multi-timeframe strategy implementation
+
+**dgas/backtesting/strategies/prediction_signal.py**
+- `PredictionSignalStrategyConfig(StrategyConfig)`: Configuration for prediction signal strategy
+- `PredictionSignalStrategy(BaseStrategy)`: Strategy that uses PredictionEngine's SignalGenerator for signal generation
+  - `_get_signal_generator(htf_timeframe: str, trading_timeframe: str) -> SignalGenerator`: Get or create SignalGenerator
 
 **dgas/backtesting/strategies/registry.py**
 - `STRATEGY_REGISTRY`: Mapping names to classes
-- `instantiate_strategy(name: str, params: dict) -> BaseStrategy`: Build configured strategies from CLI overrides
-- Goal: Registry-based strategy discovery
+- `instantiate_strategy(name: str, params: Mapping[str, Any] | None) -> BaseStrategy`: Build configured strategies from CLI overrides
 
 **dgas/backtesting/runner.py**
 - `BacktestRequest`: Dataclass encapsulating CLI options
-- `BacktestRunner.run(request: BacktestRequest) -> list[BacktestRunResult]`: Load datasets, instantiate strategy, run engine, compute metrics, optionally persist
-- Goal: High-level orchestration reused by CLI, tests, notebooks
+- `BacktestRunResult`: Dataclass (request, result, performance, symbol)
+- `BacktestRunner`: High-level orchestration
+  - `run(request: BacktestRequest) -> list[BacktestRunResult]`: Load datasets, instantiate strategy, run engine, compute metrics, optionally persist
 
 **dgas/backtesting/metrics.py**
+- `PerformanceSummary`: Dataclass with performance metrics
 - `calculate_performance(result: BacktestResult, risk_free_rate: Decimal) -> PerformanceSummary`: Compute total/annualized return, volatility, Sharpe, Sortino, max drawdown, trade stats, profit factor, net profit
-- Goal: Centralized performance analytics
 
 **dgas/backtesting/persistence.py**
 - `persist_backtest(result: BacktestResult, performance: PerformanceSummary, metadata: dict | None, conn: Connection | None) -> int`: Store backtest summary and trade ledger in PostgreSQL
-- Goal: Durable storage of simulation outcomes
 
 **dgas/backtesting/reporting.py**
 - `build_summary_table(run_results: List[BacktestRunResult]) -> rich.table.Table`: Console-ready summary view
 - `export_markdown(run: BacktestRunResult, path: Path) -> None`, `export_json(run: BacktestRunResult, path: Path) -> None`: Generate shareable artifacts
-- Goal: Reporting helpers shared by CLI and UIs
 
 ---
 
-### Prediction System
+## Prediction System
+
 **dgas/prediction/persistence.py**
 - `PredictionPersistence(settings: Settings | None)`: Database persistence for prediction system
   - `save_prediction_run(...) -> int`: Save prediction cycle metadata with timing breakdown
@@ -394,29 +450,19 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
   - `update_signal_outcome(signal_id: int, outcome: str, actual_high: Decimal, actual_low: Decimal, actual_close: Decimal, pnl_pct: float) -> None`: Update signal with actual price data
   - `save_metric(metric_type: str, metric_value: float, aggregation_period: str | None, metadata: dict | None) -> int`: Save performance/calibration metric
   - `get_metrics(metric_type: str | None, lookback_hours: int, aggregation_period: str | None, limit: int) -> List[dict]`: Query metrics for analysis
-  - `update_scheduler_state(status: str, last_run_timestamp: datetime | None, next_scheduled_run: datetime | None, current_run_id: int | None, error_message: str | None) -> None`: Update singleton scheduler state
+  - `update_scheduler_state(...) -> None`: Update singleton scheduler state
   - `get_scheduler_state() -> dict | None`: Retrieve current scheduler status
-- Goal: CRUD operations for prediction runs, signals, metrics, scheduler state
 
 **dgas/prediction/engine.py**
 - `SignalType(Enum)`: LONG, SHORT, EXIT_LONG, EXIT_SHORT
 - `GeneratedSignal`: Complete trading signal with context (symbol, signal_timestamp, signal_type, entry_price, stop_loss, target_price, confidence, signal_strength, timeframe_alignment, risk_reward_ratio, htf_trend, trading_tf_state, confluence_zones_count, pattern_context, notification tracking, outcome tracking)
 - `SignalGenerator(coordinator, min_alignment_score, min_signal_strength, stop_loss_atr_multiplier, target_rr_ratio)`: Signal generation from multi-timeframe analysis
   - `generate_signals(symbol: str, htf_data: TimeframeData, trading_tf_data: TimeframeData, ltf_data: TimeframeData | None) -> List[GeneratedSignal]`: Create actionable signals
-  - `_apply_entry_rules(analysis: MultiTimeframeAnalysis) -> SignalType | None`: Determine signal type
-  - `_calculate_levels(signal_type: SignalType, analysis: MultiTimeframeAnalysis, trading_tf_data: TimeframeData) -> tuple[Decimal, Decimal, Decimal]`: Calculate entry/stop/target
-  - `_calculate_confidence(analysis: MultiTimeframeAnalysis) -> float`: Weighted score
-- `SignalAggregator(dedup_time_window_minutes: int, min_confidence: float, min_alignment: float)`: De-duplication and ranking
-  - `aggregate_signals(signals: List[GeneratedSignal], min_confidence: float, min_alignment: float, enabled_patterns: set[str], max_signals: int) -> List[GeneratedSignal]`: Filter, rank, deduplicate
-  - `_detect_duplicates(signals: List[GeneratedSignal]) -> List[GeneratedSignal]`: Remove duplicates within time window
-  - `_rank_signals(signals: List[GeneratedSignal]) -> List[GeneratedSignal]`: Rank by composite score
+- `SignalAggregator(dedup_time_window_minutes, min_confidence, min_alignment)`: De-duplication and ranking
+  - `aggregate_signals(signals: List[GeneratedSignal], min_confidence, min_alignment, enabled_patterns, max_signals) -> List[GeneratedSignal]`: Filter, rank, deduplicate
 - `PredictionRunResult`: Execution metrics from prediction cycle
 - `PredictionEngine(settings, persistence, signal_generator, lookback_bars: int)`: Prediction pipeline orchestration
   - `execute_prediction_cycle(symbols: List[str], interval: str, timeframes: dict, htf_interval: str, trading_interval: str, persist_results: bool) -> PredictionRunResult`: Full cycle
-  - `_refresh_market_data(symbols: List[str], interval: str, errors: List[str]) -> None`: Incremental updates
-  - `_load_market_data(symbol: str, interval: str) -> List[IntervalData]`: Load recent bars
-  - `_calculate_timeframe_data(intervals: List[IntervalData], timeframe: str, classification: TimeframeType) -> TimeframeData`: Recompute indicators
-- Goal: Transform multi-timeframe analysis into actionable trading signals
 
 **dgas/prediction/scheduler.py**
 - `TradingSession`: Trading session configuration (market_open, market_close, timezone, trading_days)
@@ -424,75 +470,53 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 - `MarketHoursManager(exchange_code: str, session: TradingSession, calendar: ExchangeCalendar)`: Trading hours awareness
   - `is_market_open(dt: datetime) -> bool`: Check if market is currently open
   - `next_market_open(from_dt: datetime) -> datetime`: Calculate next market open time
-  - `next_market_close(from_dt: datetime) -> datetime`: Calculate next market close time (handles half-days)
-  - `is_trading_day(dt: datetime) -> bool`: Check if given datetime is trading day
+  - `next_market_close(from_dt: datetime) -> datetime`: Calculate next market close time
 - `PredictionScheduler(config: SchedulerConfig, engine: PredictionEngine, persistence: PredictionPersistence, market_hours: MarketHoursManager)`: APScheduler-based prediction orchestration
   - `start() -> None`: Start scheduler with APScheduler, run catch-up if enabled
-  - `stop(wait: bool) -> None`: Graceful shutdown with signal handling
+  - `stop(wait: bool) -> None`: Graceful shutdown
   - `run_once() -> PredictionRunResult`: Execute single prediction cycle manually
-  - `_run_catch_up() -> None`: Run comprehensive cycle from market open to now if started late
-  - `_execute_if_market_open() -> None`: Execute cycle only if market is open (scheduled job)
-- Goal: Automated prediction execution during market hours with recovery and graceful shutdown
 
 **dgas/prediction/notifications/router.py**
-- `NotificationConfig`: Configuration for notification delivery (enabled_channels, discord_bot_token, discord_channel_id, discord_min_confidence, console_max_signals, console_format)
-  - `from_env() -> NotificationConfig`: Create config from environment variables
+- `NotificationConfig`: Configuration for notification delivery
 - `NotificationAdapter(ABC)`: Abstract base for notification channel implementations
-  - `send(signals: List[GeneratedSignal], metadata: dict) -> bool`: Send notifications
-  - `format_message(signals: List[GeneratedSignal]) -> str`: Format signals for channel
-  - `should_notify(signal: GeneratedSignal, min_confidence: float) -> bool`: Check if signal meets threshold
 - `NotificationRouter(config: NotificationConfig, adapters: dict[str, NotificationAdapter])`: Routes signals to configured channels
   - `send_notifications(signals: List[GeneratedSignal], run_metadata: dict) -> None`: Send notifications through all enabled channels
-  - `_filter_signals_for_channel(signals: List[GeneratedSignal], channel: str) -> List[GeneratedSignal]`: Filter signals based on channel-specific thresholds
-- Goal: Multi-channel notification delivery with proper error handling
 
 **dgas/prediction/notifications/adapters/discord.py**
 - `DiscordAdapter(bot_token: str, channel_id: str, rate_limit_delay: float, timeout: int)`: Discord Bot API integration
   - `send(signals: List[GeneratedSignal], metadata: dict) -> bool`: Send signals as individual Discord embeds
-  - `_create_embed(signal: GeneratedSignal, metadata: dict) -> dict`: Create Discord embed object (Green for LONG, Red for SHORT)
-  - `_format_confidence_bar(confidence: float) -> str`: Visual confidence bar using Unicode blocks
-  - `_send_to_discord(embeds: List[dict]) -> bool`: Send embeds via Discord API with rate limiting and retry logic
-- Goal: Discord bot integration with rich embeds and rate limiting
 
 **dgas/prediction/notifications/adapters/console.py**
 - `ConsoleAdapter(max_signals: int, output_format: str)`: Rich console table output
   - `send(signals: List[GeneratedSignal], metadata: dict) -> bool`: Display signals in formatted Rich table
-  - `_display_summary_table(signals: List[GeneratedSignal], metadata: dict) -> None`: Compact summary table
-  - `_display_detailed_table(signals: List[GeneratedSignal], metadata: dict) -> None`: Detailed panel view per signal
-- Goal: Console output with rich formatting (summary/detailed formats)
 
 **dgas/prediction/monitoring/performance.py**
-- `LatencyMetrics(data_fetch_ms: int, indicator_calc_ms: int, signal_generation_ms: int, notification_ms: int, total_ms: int)`: Latency measurements
-- `ThroughputMetrics(symbols_processed: int, signals_generated: int, execution_time_ms: int, symbols_per_second: float)`: Throughput measurements
-  - `calculate(symbols_processed: int, signals_generated: int, execution_time_ms: int) -> ThroughputMetrics`: Calculate from raw counts
+- `LatencyMetrics`: Latency measurements (data_fetch_ms, indicator_calc_ms, signal_generation_ms, notification_ms, total_ms)
+- `ThroughputMetrics`: Throughput measurements (symbols_processed, signals_generated, execution_time_ms, symbols_per_second)
 - `PerformanceTracker(persistence: PredictionPersistence)`: System performance monitoring
   - `track_cycle(run_id: int, latency: LatencyMetrics, throughput: ThroughputMetrics, errors: List[str]) -> None`: Record cycle metrics
   - `get_performance_summary(lookback_hours: int) -> dict[str, Any]`: Aggregate statistics
   - `check_sla_compliance() -> dict[str, bool]`: Verify SLA targets
-- Goal: Track system performance and validate SLA compliance
 
 **dgas/prediction/monitoring/calibration.py**
 - `CalibrationEngine(persistence: PredictionPersistence, evaluation_window_hours: int)`: Signal accuracy validation
   - `evaluate_signal(signal: GeneratedSignal, actual_prices: dict) -> dict`: Compare signal to actual outcome
   - `batch_evaluate(lookback_hours: int) -> dict[str, Any]`: Evaluate all pending signals
   - `get_calibration_report(date_range: tuple[datetime, datetime]) -> dict[str, Any]`: Win rate by confidence bucket
-- Goal: Validate prediction accuracy and calibration
 
 ---
 
-### CLI Commands
+## CLI Commands
+
 **dgas/cli/analyze.py**
 - `load_market_data(symbol: str, interval: str, lookback_bars: int) -> list[IntervalData]`: Load from DB
 - `calculate_indicators(intervals: list[IntervalData]) -> TimeframeData`: Calculate all indicators for single TF
 - `display_single_timeframe_analysis(symbol: str, interval: str, tf_data: TimeframeData) -> None`: Rich console output
 - `display_multi_timeframe_analysis(symbol: str, analysis: MultiTimeframeAnalysis) -> None`: Rich console output
 - `run_analyze_command(symbols: list[str], htf_interval: str, trading_interval: str, lookback_bars: int, save_to_db: bool, output_format: str) -> int`: Full analysis workflow
-- Goal: Interactive CLI for Drummond Geometry analysis
 
 **dgas/cli/backtest.py**
 - `run_backtest_command(...) -> int`: Parse CLI arguments, invoke BacktestRunner, render Rich summary/detailed output, emit optional Markdown/JSON artifacts
-- Helpers: `_parse_datetime`, `_resolve_output_path`, `_format_percent/_format_number`
-- Goal: User-facing entry to backtesting workflow
 
 **dgas/cli/configure.py**
 - `setup_configure_parser(subparsers) -> ArgumentParser`: Set up configure subcommand
@@ -500,158 +524,93 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 - `_show_command(args: Namespace) -> int`: Display current configuration
 - `_validate_command(args: Namespace) -> int`: Validate configuration file
 - `_edit_command(args: Namespace) -> int`: Edit configuration file
-- Goal: Configuration file management and interactive setup
 
 **dgas/cli/data.py**
 - `setup_data_parser(subparsers) -> ArgumentParser`: Set up data subcommand
 - Data management commands: backfill, update, report, quality
-- Goal: Data ingestion and quality management
 
 **dgas/cli/predict.py**
 - `setup_predict_parser(subparsers) -> ArgumentParser`: Set up predict subcommand
 - `run_predict_command(args: Namespace) -> int`: Generate trading signals with flexible output formats
-- Goal: Manual signal generation with notifications
 
 **dgas/cli/report.py**
 - `setup_report_parser(subparsers) -> ArgumentParser`: Set up report subcommand
 - Report generation: performance, signals, backtests, system
-- Goal: Comprehensive report generation
 
 **dgas/cli/scheduler_cli.py**
 - `setup_scheduler_parser(subparsers) -> ArgumentParser`: Set up scheduler subcommand
 - Scheduler management: start, stop, status, run-once
-- Goal: Prediction scheduler management
 
 **dgas/cli/status_cli.py**
 - `setup_status_parser(subparsers) -> ArgumentParser`: Set up status subcommand
 - System health monitoring: database, API, scheduler, predictions
-- Goal: System health and status monitoring
 
 **dgas/cli/monitor.py**
 - `setup_monitor_parser(subparsers) -> ArgumentParser`: Set up monitor subcommand
 - Performance monitoring: latency, throughput, errors, SLA compliance
-- Goal: Real-time performance tracking
 
 ---
 
-### Dashboard System
+## Dashboard System
+
 **dgas/dashboard/__main__.py**
 - `build_parser() -> ArgumentParser`: Dashboard CLI argument parser
 - `main(argv: list[str] | None) -> int`: Start Streamlit dashboard server
-- Goal: Dashboard CLI entry point
 
 **dgas/dashboard/app.py**
 - `configure_page() -> None`: Configure Streamlit page settings
 - `render_sidebar() -> str`: Render sidebar navigation and return selected page
 - `render_page(page: str) -> None`: Render selected page
 - `main() -> NoReturn`: Main application entry point
-- Goal: Main Streamlit dashboard application with navigation
 
-**dgas/dashboard/pages/01_Overview.py**
-- `Overview.render() -> None`: Overview page with system metrics and recent activity
-- Goal: Dashboard overview page
+**dgas/dashboard/pages/**: 01_Overview.py, 02_Data.py, 03_Predictions.py, 04_Backtests.py, 05_System_Status.py, 06_Custom_Dashboard.py
+- Each page has `render() -> None` function
 
-**dgas/dashboard/pages/02_Data.py**
-- `Data.render() -> None`: Data ingestion and quality page
-- Goal: Data management visualization
+**dgas/dashboard/components/**: database.py, charts.py, notifications.py, utils.py
+- Database query components, chart components, notification UI, shared utilities
 
-**dgas/dashboard/pages/03_Predictions.py**
-- `Predictions.render() -> None`: Predictions and signals page
-- Goal: Signal visualization and filtering
-
-**dgas/dashboard/pages/04_Backtests.py**
-- `Backtests.render() -> None`: Backtest results page
-- Goal: Backtest visualization and analysis
-
-**dgas/dashboard/pages/05_System_Status.py**
-- `SystemStatus.render() -> None`: System status and health page
-- Goal: System monitoring dashboard
-
-**dgas/dashboard/pages/06_Custom_Dashboard.py**
-- `CustomDashboard.render() -> None`: Custom dashboard builder page
-- Goal: User-configurable dashboard with widgets
-
-**dgas/dashboard/components/database.py**
-- Database query components and utilities
-- Goal: Database interaction components
-
-**dgas/dashboard/components/charts.py**
-- Chart components for visualization
-- Goal: Reusable chart components
-
-**dgas/dashboard/components/notifications.py**
-- Notification components and UI
-- Goal: Notification management UI
-
-**dgas/dashboard/components/utils.py**
-- `load_dashboard_config() -> DGASConfig`: Load dashboard configuration
-- Utility functions for dashboard components
-- Goal: Shared dashboard utilities
-
-**dgas/dashboard/widgets/base.py**
-- Base widget class for custom dashboard widgets
-- Goal: Widget framework foundation
-
-**dgas/dashboard/widgets/metric.py**
-- Metric widget implementation
-- Goal: Metric display widget
-
-**dgas/dashboard/widgets/chart.py**
-- Chart widget implementation
-- Goal: Chart display widget
-
-**dgas/dashboard/widgets/table.py**
-- Table widget implementation
-- Goal: Table display widget
+**dgas/dashboard/widgets/**: base.py, metric.py, chart.py, table.py
+- Base widget class and implementations (Metric, Chart, Table widgets)
 
 **dgas/dashboard/layout/manager.py**
-- Layout management for custom dashboards
-- Goal: Dashboard layout persistence and management
+- `LayoutManager`: Layout management for custom dashboards
+- `get_manager() -> LayoutManager`: Global singleton
 
-**dgas/dashboard/filters/preset_manager.py**
-- Filter preset management
-- Goal: Save and reuse filter configurations
-
-**dgas/dashboard/filters/preset_ui.py**
-- Filter preset UI components
-- Goal: Filter preset user interface
+**dgas/dashboard/filters/**: preset_manager.py, preset_ui.py
+- Filter preset management and UI
 
 **dgas/dashboard/export/enhanced_exporter.py**
-- Multi-format export (CSV, Excel, JSON, PDF)
-- Goal: Report export functionality
+- `EnhancedExporter`: Multi-format export (CSV, Excel, JSON, PDF)
 
 **dgas/dashboard/services/notification_service.py**
-- Notification service integration
-- Goal: Dashboard notification integration
+- `NotificationService`: Notification service integration
 
 **dgas/dashboard/realtime_client.py**
+- `RealtimeClient`: Real-time data updates via WebSocket
 - `get_client() -> RealtimeClient`: Get real-time client instance
 - `setup_realtime_client() -> None`: Initialize real-time client
-- `render_websocket_status() -> None`: Display WebSocket connection status
-- `check_for_updates() -> None`: Polling fallback for updates
-- Goal: Real-time data updates via WebSocket
 
 **dgas/dashboard/websocket_server.py**
-- WebSocket server for real-time updates
-- Goal: Real-time data streaming to dashboard
+- `DashboardWebSocketServer`: WebSocket server for real-time updates
+- `start_server(host: str, port: int) -> DashboardWebSocketServer`: Start WebSocket server
 
 **dgas/dashboard/performance/optimizer.py**
-- Dashboard performance optimization
-- Goal: Dashboard performance tuning
+- `PerformanceMonitor`: Dashboard performance optimization
+- `CacheManager`: Query result caching for dashboard
+- `LazyLoader`: Lazy loading for dashboard components
 
 **dgas/dashboard/utils/alert_rules.py**
-- Alert rule management
-- Goal: Customizable alert rules
+- `AlertRulesEngine`: Alert rule management
 
 ---
 
-### Monitoring
+## Monitoring
+
 **dgas/monitoring/report.py**
 - `SymbolIngestionStats`: Symbol ingestion statistics
 - `generate_ingestion_report(interval: str) -> List[SymbolIngestionStats]`: Query DB for coverage
 - `render_markdown_report(stats: Iterable[SymbolIngestionStats]) -> str`: Format as GFM table
 - `write_report(stats: Iterable[SymbolIngestionStats], output_path: Path) -> None`
-- Goal: Generate completeness reports for ingested market data
 
 ---
 
@@ -678,6 +637,7 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 │                        Configuration Layer                                   │
 │  config/loader.py → config/schema.py → config/adapter.py                    │
 │  settings.py (legacy)                                                        │
+│  core/config_manager.py (server resource config)                              │
 └──────────────────────┬────────────────────────────────────────────────────────┘
                        │
         ┌───────────────┴──────────────┬──────────────────┬─────────────────────┐
@@ -691,6 +651,9 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 │  - performance_monitor.py                                               │   │ - exchange_calendar│   │ - optimized_*      │   │   reporting        │
 │  - persistence.py                                                      │   │                   │   │ - timeframe_builder│   │ - strategies/      │
 │  - migrations.py                                                        │   │                   │   │                   │   │   (base, registry) │
+│  - optimizer.py                                                        │   │                   │   │                   │   │ - portfolio_*      │
+│                                                                          │   │                   │   │                   │   │ - signal_*         │
+│                                                                          │   │                   │   │                   │   │ - execution/       │
 └──────┬────────┘   └─────────┬──────────┘   └────────┬───────┘   └────────┬──────────┘
        │                      │                      │                    │
        ↓                      ↓                      ↓                    ↓
@@ -723,6 +686,20 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 │  - export/ → Multi-format export                                            │
 │  - realtime_client.py → WebSocket client                                     │
 │  - websocket_server.py → WebSocket server                                    │
+│  - performance/ → Performance optimization                                  │
+│  - services/ → Notification service                                         │
+│  - utils/ → Alert rules                                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Core Utilities                                        │
+│  core/                                                                       │
+│  - config_manager.py → Server resource configuration                         │
+│  - connection_pool.py → Database connection pooling                         │
+│  - parallel_processor.py → Parallel batch processing                       │
+│  - io_optimizer.py → Batch I/O, memory monitoring, file writing            │
+│  utils/                                                                      │
+│  - market_hours_filter.py → Regular hours filtering                         │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -734,7 +711,9 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 2. **CLI Routing**: `__main__.py` dispatches to subcommands (analyze, backtest, configure, data, predict, report, scheduler, status, monitor)
 3. **Ingestion**: `data/` modules fetch EODHD data, validate quality, persist via `bulk_upsert_market_data()`
 4. **Calculations**: `calculations/` modules produce PLdot, envelopes, states, patterns, multi-timeframe alignment (with caching and profiling)
-5. **Backtesting**: `backtesting/runner.py` loads historical bars, runs strategies through engine, computes metrics, optionally persists, exports reports
+5. **Backtesting**: 
+   - Single-symbol: `backtesting/runner.py` loads historical bars, runs strategies through `engine.py`, computes metrics, optionally persists
+   - Portfolio: `backtesting/portfolio_engine.py` coordinates multi-symbol backtesting with shared capital, signal ranking, position management
 6. **Prediction**: `prediction/engine.py` orchestrates signal generation → `prediction/scheduler.py` schedules execution → `prediction/notifications/` delivers alerts
 7. **Dashboard**: `dashboard/app.py` serves Streamlit UI → `dashboard/realtime_client.py` connects to WebSocket → pages render data from persistence layer
 8. **Monitoring**: `monitoring/report.py` generates ingestion coverage summaries; `prediction/monitoring/` tracks performance and calibration
@@ -758,12 +737,12 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 - Single Settings instance via @lru_cache
 - UnifiedSettings adapter bridges new config system and legacy Settings
 - Reusable repository functions (ensure_market_symbol, bulk_upsert_market_data)
-- Generic timestamp coercion (_coerce_time_param, _coerce_date_param)
 - Shared quality analysis (analyze_intervals, summarize_reports)
 - Factory methods for data models (IntervalData.from_api_record, IntervalData.from_api_list)
 - Calculation caching (CalculationCache, CacheInvalidationManager)
 - Query result caching (QueryCache, CacheManager)
-- Connection pooling (PooledConnectionManager)
+- Connection pooling (PooledConnectionManager, DatabaseConnectionPool)
+- Shared trade execution logic (BaseTradeExecutor) eliminates duplication between SimulationEngine and PortfolioPositionManager
 
 ### Naming
 - snake_case for functions, variables, modules
@@ -772,7 +751,7 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 - Descriptive names: bulk_upsert_market_data, not save_data; MultiTimeframeCoordinator, not MTF
 
 ### Dependencies
-- Production: numpy, pandas, pydantic, pydantic-settings, python-dotenv, requests, sqlalchemy, psycopg[binary], structlog, rich, apscheduler, pyyaml
+- Production: numpy, pandas, pydantic, pydantic-settings, python-dotenv, requests, sqlalchemy, psycopg[binary], structlog, rich, apscheduler, pyyaml, psutil
 - Dashboard: streamlit, plotly
 - Dev: pytest, ruff (linter/formatter), mypy (type checker)
 - Line length: 100 chars (ruff config)
@@ -789,12 +768,11 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 ### Core Tables
 - **market_symbols**: symbol (unique), exchange, metadata (sector, industry, market_cap)
 - **market_data**: OHLCV bars with interval_type, unique on (symbol_id, timestamp, interval_type)
-  * Constraints: positive prices, OHLC relationships (high >= open/close, low <= open/close)
 - **market_states_v2**: Enhanced state classification with confidence, trend direction, PLdot slope, bars_in_state
 - **pattern_events**: Detected patterns (PLDOT_PUSH, EXHAUST, C_WAVE, etc.) with direction, strength, timestamps
 - **multi_timeframe_analysis**: HTF/trading TF alignment, signal strength, recommended action, confluence zones count
 - **confluence_zones**: Support/resistance zones confirmed by multiple timeframes (strength >= 2)
-- **prediction_runs**: Prediction cycle metadata with timing breakdown (data_fetch_ms, indicator_calc_ms, signal_generation_ms, notification_ms)
+- **prediction_runs**: Prediction cycle metadata with timing breakdown
 - **generated_signals**: Trading signals with confidence scores, context, outcomes, notification tracking
 - **prediction_metrics**: Time-series performance and calibration metrics
 - **scheduler_state**: Singleton table for scheduler status and recovery
@@ -812,158 +790,26 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 
 ---
 
-## Current Implementation Status
-
-### Completed
-✓ Database schema and migrations (001-004)
-✓ Settings and configuration (legacy + new config system)
-✓ EODHD API client with rate limiting
-✓ Data models (IntervalData) with validation
-✓ Repository layer (upsert, latest timestamp queries)
-✓ Ingestion workflows (backfill, incremental updates)
-✓ Quality analysis (gaps, duplicates, chronology)
-✓ Exchange calendar system with EODHD integration
-✓ PLdot calculations (3-bar MA with projection)
-✓ Envelope bands (PLdot range method - Drummond's preferred)
-✓ Drummond lines and zones (two-bar logic)
-✓ Market state classification (5-state model with confidence)
-✓ Pattern detection (PLdot push/refresh, exhaust, C-wave, congestion oscillation)
-✓ Multi-timeframe coordination (HTF trend filter, PLdot overlay, confluence zones, alignment scoring)
-✓ Database persistence (DrummondPersistence, PredictionPersistence)
-✓ Backtesting engine with deterministic simulation
-✓ Strategy framework with multi-timeframe strategy
-✓ Performance metrics (Sharpe, Sortino, max drawdown, win rate)
-✓ CLI commands (analyze, backtest, configure, data, predict, report, scheduler, status, monitor)
-✓ Prediction system (engine, scheduler, notifications, monitoring, calibration)
-✓ Dashboard system (Streamlit UI with 6 pages, real-time updates, custom widgets, export)
-✓ Performance optimizations (connection pooling, query caching, calculation caching, profiling)
-✓ Configuration system (YAML/JSON config files with env var expansion)
-
-### In Progress / Future
-? ML-enhanced confidence scoring
-? Adaptive threshold tuning based on calibration
-? Real-time streaming updates (WebSocket fully implemented, may need enhancements)
-? Advanced PLdot variants (volume-weighted, momentum)
-? Portfolio-level risk management
-
----
-
-## Key Design Decisions
-
-1. **Local-first**: PostgreSQL over cloud services for control and cost
-2. **Immutable data models**: Pydantic frozen=True, dataclass frozen=True for all calculation results
-3. **Explicit over implicit**: Type hints, validator methods, named parameters
-4. **Separation of concerns**: data/ (I/O), calculations/ (logic), db/ (persistence), cli/ (UI), prediction/ (signals), dashboard/ (visualization)
-5. **No ORM for ingestion**: Raw psycopg for bulk upserts (performance)
-6. **Rate limiting**: Client-side token bucket to avoid 429s
-7. **Decimal precision**: Prices as Decimal to match DB NUMERIC(12,6)
-8. **UTC everywhere**: Avoid timezone bugs with explicit timezone.utc
-9. **Multi-timeframe first**: HTF defines trend direction, trading TF provides entries (core Drummond principle)
-10. **Frozen dataclasses**: All calculation results are immutable to prevent accidental mutations
-11. **Connection pooling**: psycopg_pool for improved performance
-12. **Query caching**: In-memory caching with TTL for frequently-accessed data
-13. **Calculation caching**: Specialized cache for expensive calculations with intelligent invalidation
-14. **Performance profiling**: Built-in profiling for calculations and queries
-15. **Unified configuration**: Bridge between new config files and legacy environment variables
-16. **Real-time dashboard**: Streamlit with WebSocket for live updates
-
----
-
-## Performance Considerations
-
-- **Bulk operations**: Use executemany for multi-row inserts
-- **Indexing**: DESC indexes match ORDER BY timestamp DESC queries
-- **Connection pooling**: psycopg_pool for reduced connection overhead
-- **Caching**: Settings cached via @lru_cache, calculation results cached, query results cached
-- **Pandas**: Used only in calculations/ where vectorization helps (PLdot, envelopes)
-- **Decimal precision**: Trade-off between precision and performance (Decimal is slower than float but required for financial accuracy)
-- **Binary search**: OptimizedTimeframeData uses binary search for O(log n) timestamp lookups
-- **Optimized clustering**: OptimizedMultiTimeframeCoordinator uses O(n log n) sorting vs O(n²) nested loops
-- **Target**: <200ms per symbol/timeframe bundle (achieved through caching and optimizations)
-
----
-
-## Common Patterns
-
-### Adding a new calculation
-1. Define result dataclass in calculations/ (frozen=True, Decimal fields)
-2. Create Calculator class with __init__ parameters
-3. Implement from_intervals(Sequence[IntervalData]) -> List[ResultType]
-4. Use pandas for rolling/windowed operations if needed
-5. Add corresponding DB table in migrations/ if persisting
-6. Write persistence method in db/persistence.py if needed
-7. Consider adding to CalculationCache for performance
-
-### Extending ingestion
-1. Add new method to EODHDClient (follow fetch_intraday pattern)
-2. Parse response into IntervalData.from_api_list or new model
-3. Add quality checks to quality.analyze_intervals if needed
-4. Create ingestion function in ingestion.py using _client_context
-5. Return IngestionSummary with quality report
-6. Register data update with CacheInvalidationManager
-
-### Adding CLI commands
-1. Add subparser in __main__.build_parser()
-2. Create setup_*_parser function in cli/ module
-3. Handle in __main__.main() with args.func or args.command check
-4. Import and call relevant functions from modules
-5. Use Rich for formatted output (tables, panels, colors)
-6. Return 0 on success, nonzero on failure
-
-### Multi-timeframe analysis workflow
-1. Load data for HTF and trading TF using load_market_data()
-2. Calculate indicators for each TF (build_timeframe_data() or calculate_indicators())
-3. Create TimeframeData objects with classification (HIGHER/TRADING)
-4. Instantiate MultiTimeframeCoordinator (or OptimizedMultiTimeframeCoordinator) with TF intervals
-5. Call coordinator.analyze(htf_data, trading_tf_data)
-6. Use analysis.signal_strength and analysis.recommended_action for trading decisions
-7. Optionally save via DrummondPersistence.save_multi_timeframe_analysis()
-
-### Adding dashboard pages
-1. Create page module in dashboard/pages/
-2. Implement render() function
-3. Import and register in dashboard/app.py
-4. Add to sidebar navigation in render_sidebar()
-5. Use dashboard/components/ for reusable components
-6. Consider real-time updates via realtime_client.py
-
----
-
-## Anti-Patterns to Avoid
-
-✗ Mixing sync and async (all code is synchronous for simplicity)
-✗ String SQL without parameters (always use %s placeholders)
-✗ Float for prices (use Decimal to match DB precision)
-✗ Naive datetimes (always set tzinfo=timezone.utc)
-✗ Global state (use dependency injection: client, conn args)
-✗ Catching bare Exception without logging/re-raise
-✗ Mutating Pydantic models or frozen dataclasses (all are frozen=True)
-✗ Hardcoding timeframes (use constants or settings)
-✗ Ignoring HTF trend direction (core Drummond principle)
-✗ Bypassing connection pool (use get_db_connection() instead of direct connections)
-✗ Not using query cache for frequently-accessed data
-✗ Not profiling slow calculations
-
----
-
 ## Veteran Developer Observations
 
 ### Architecture Strengths
-1. **Clear separation of concerns**: data/, calculations/, db/, cli/, prediction/, dashboard/ are well-defined boundaries
+1. **Clear separation of concerns**: data/, calculations/, db/, cli/, prediction/, dashboard/, backtesting/ are well-defined boundaries
 2. **Type safety**: Comprehensive type hints and Pydantic validation catch errors early
 3. **Immutable data structures**: Frozen dataclasses prevent accidental mutations
-4. **DRY principle**: Reusable repository functions, shared quality checks, factory methods, unified configuration
+4. **DRY principle**: Reusable repository functions, shared quality checks, factory methods, unified configuration, shared trade execution logic
 5. **Multi-timeframe first**: Core Drummond principle is properly implemented with HTF trend filtering
-6. **Performance optimizations**: Connection pooling, query caching, calculation caching, profiling built-in
-7. **Unified configuration**: Seamless bridge between new config files and legacy environment variables
-8. **Real-time capabilities**: WebSocket support for live dashboard updates
-9. **Comprehensive monitoring**: Performance tracking, calibration, SLA compliance built-in
+6. **Performance optimizations**: Connection pooling, query caching, calculation caching, profiling built-in, parallel processing support
+7. **Portfolio-level backtesting**: Sophisticated multi-symbol backtesting with shared capital, signal ranking, position management
+8. **Signal evaluation**: Built-in signal accuracy tracking and evaluation
+9. **Unified configuration**: Seamless bridge between new config files and legacy environment variables
+10. **Real-time capabilities**: WebSocket support for live dashboard updates
+11. **Comprehensive monitoring**: Performance tracking, calibration, SLA compliance built-in
 
 ### Areas for Improvement
 1. **Error handling**: Some areas could benefit from more specific exception types (e.g., CalculationError, PersistenceError)
 2. **Logging**: Consider structured logging (structlog is in dependencies but not extensively used)
 3. **Testing**: Some calculation modules could use more edge case coverage
-4. **Documentation**: Inline docstrings are good, but some complex algorithms (multi-timeframe coordination) could use more explanation
+4. **Documentation**: Inline docstrings are good, but some complex algorithms (multi-timeframe coordination, portfolio backtesting) could use more explanation
 5. **Async support**: Consider async/await for I/O-bound operations (database, API calls) in future versions
 6. **Distributed caching**: Current caching is in-memory; consider Redis for multi-process deployments
 
@@ -981,12 +827,13 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 
 ### Design Patterns
 - **Factory pattern**: IntervalData.from_api_record, EODHDConfig.from_settings, ConfigLoader.generate_sample_config
-- **Strategy pattern**: EnvelopeCalculator methods (pldot_range, atr, percentage), NotificationAdapter implementations
+- **Strategy pattern**: EnvelopeCalculator methods, NotificationAdapter implementations, BaseStrategy for backtesting
 - **Context manager pattern**: get_connection, get_db_connection, _client_context, DrummondPersistence
 - **Repository pattern**: data/repository.py for data access abstraction
 - **Adapter pattern**: UnifiedSettings bridges new config system and legacy Settings
 - **Singleton pattern**: Global instances for cache managers, profilers, connection pools
 - **Observer pattern**: DataUpdateListener for cache invalidation on data updates
+- **Template method pattern**: BaseTradeExecutor provides shared execution logic, BaseStrategy for strategy framework
 
 ### Performance Architecture
 - **Connection pooling**: Reduces connection overhead, especially important for prediction cycles processing multiple symbols
@@ -994,7 +841,18 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 - **Calculation caching**: Specialized cache for expensive calculations with intelligent invalidation
 - **Profiling**: Built-in profiling for calculations and queries to identify bottlenecks
 - **Optimizations**: Binary search for timestamp lookups, optimized clustering algorithms, early termination
+- **Parallel processing**: Support for parallel batch processing in core/parallel_processor.py
+- **Memory management**: Memory monitoring and GC optimization in core/io_optimizer.py
 - **Target achieved**: <200ms per symbol/timeframe bundle through comprehensive optimization
+
+### Portfolio Backtesting Architecture
+- **Shared capital pool**: PortfolioPositionManager manages multiple positions sharing capital
+- **Signal ranking**: SignalRanker prioritizes signals based on composite score (signal strength, risk/reward, confluence, trend alignment, volatility)
+- **Position diversity**: Penalizes over-concentration in same sector
+- **Confidence scaling**: Optional confidence-based position sizing
+- **On-the-fly indicators**: PortfolioIndicatorCalculator calculates indicators during backtest without pre-computation
+- **HTF caching**: Pre-loads higher timeframe data for all symbols to avoid repeated queries
+- **Signal evaluation**: SignalEvaluator tracks predicted signals vs actual trade outcomes
 
 ---
 

@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """Evaluation backtest for Drummond Geometry trading signals.
 
-Runs a comprehensive evaluation test across Nasdaq 100 symbols using
+Runs a comprehensive evaluation test across SP500 symbols using
 the PredictionEngine's SignalGenerator to validate signal accuracy.
 
 Configuration:
-- Date Range: 2025-09-07 to 2025-11-07 (3 months minus 1 day)
+- Date Range: 2025-09-08 to 2025-11-07 (3 months)
 - Initial Capital: $100,000 (shared across all symbols)
 - Risk per Trade: 2% of portfolio ($2,000 per trade)
 - Commission: 0%
 - Slippage: 2 basis points (0.02%)
 - Short Selling: Enabled
 - Trading Hours: Regular hours only (9:30 AM - 4:00 PM EST)
-- Symbols: 100 Nasdaq 100 tickers
+- Symbols: ~500 SP500 tickers
 """
 
 from __future__ import annotations
@@ -36,6 +36,38 @@ from dgas.backtesting.strategies.prediction_signal import (
 )
 from dgas.backtesting.metrics import calculate_performance
 from dgas.db import get_connection
+
+
+def load_sp500_symbols() -> list[str]:
+    """Load SP500 symbols from CSV file.
+
+    Returns:
+        List of symbol strings
+    """
+    csv_path = Path(__file__).parent.parent / "data" / "sp500_constituents.csv"
+
+    if not csv_path.exists():
+        raise FileNotFoundError(f"SP500 symbols file not found: {csv_path}")
+
+    symbols = []
+    with open(csv_path, "r") as f:
+        # Skip header
+        next(f)
+
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+
+            # CSV format: symbol,name,sector,industry,indices
+            parts = line.split(",")
+            if parts and parts[0]:
+                symbol = parts[0].strip()
+                if symbol:  # Avoid empty strings
+                    symbols.append(symbol)
+
+    print(f"Loaded {len(symbols)} symbols from {csv_path}")
+    return symbols
 
 
 def load_nasdaq100_symbols() -> list[str]:
@@ -129,10 +161,23 @@ def save_results_to_database(result: PortfolioBacktestResult) -> int:
     """
     from dgas.backtesting.persistence import persist_backtest
     from dgas.backtesting.entities import BacktestResult, SimulationConfig
+    from dgas.data.repository import ensure_market_symbol
+
+    # Ensure the synthetic symbol exists in database for portfolio backtests
+    # Note: symbol field is VARCHAR(10), so must use short name
+    symbol_name = "SP500_EVAL"
+    with get_connection() as conn:
+        ensure_market_symbol(
+            conn,
+            symbol_name,
+            exchange="US",
+            sector="Portfolio",
+            industry="Evaluation",
+        )
 
     # Convert portfolio result to single backtest result for database
     single_result = BacktestResult(
-        symbol="NASDAQ100_EVALUATION",
+        symbol=symbol_name,
         strategy_name="prediction_signal",
         config=SimulationConfig(
             initial_capital=result.starting_capital,
@@ -245,7 +290,7 @@ def main() -> int:
     print()
 
     # Load symbols
-    all_symbols = load_nasdaq100_symbols()
+    all_symbols = load_sp500_symbols()
 
     # Verify data availability
     symbols_with_data, symbols_missing = verify_data_availability(
@@ -301,7 +346,7 @@ def main() -> int:
     )
 
     print("Starting evaluation backtest...\n", flush=True)
-    print("⚠ This will take 8-15 hours to complete.", flush=True)
+    print("⚠ This will take 2-3 hours to complete (estimated).", flush=True)
     print("   The system will process all symbols at each timestamp.", flush=True)
     print("   Progress updates will be shown every 5% of timesteps.\n", flush=True)
 

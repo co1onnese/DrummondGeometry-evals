@@ -96,13 +96,13 @@ class DashboardWebSocketServer:
         # Clean up dead clients
         self.clients -= dead_clients
 
-    async def handle_client(self, websocket: WebSocketServerProtocol, path: str) -> None:
+    async def handle_client(self, websocket: WebSocketServerProtocol, path: str = "") -> None:
         """
         Handle a client connection.
 
         Args:
             websocket: WebSocket connection
-            path: Request path
+            path: Request path (optional for compatibility)
         """
         await self.register_client(websocket)
         try:

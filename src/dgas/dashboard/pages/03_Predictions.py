@@ -262,17 +262,25 @@ def render() -> None:
         # Risk-reward analysis
         st.subheader("Risk-Reward Analysis")
         if "risk_reward_ratio" in predictions.columns:
-            rr_stats = predictions["risk_reward_ratio"].describe()
-            col1, col2, col3, col4 = st.columns(4)
+            # Filter out NaN values
+            rr_series = predictions["risk_reward_ratio"].dropna()
+            if len(rr_series) > 0:
+                col1, col2, col3, col4 = st.columns(4)
 
-            with col1:
-                st.metric("Min R:R", f"{rr_stats['min']:.2f}")
-            with col2:
-                st.metric("Avg R:R", f"{rr_stats['mean']:.2f}")
-            with col3:
-                st.metric("Median R:R", f"{rr_stats['50%']:.2f}")
-            with col4:
-                st.metric("Max R:R", f"{rr_stats['max']:.2f}")
+                with col1:
+                    min_val = rr_series.min()
+                    st.metric("Min R:R", f"{min_val:.2f}")
+                with col2:
+                    mean_val = rr_series.mean()
+                    st.metric("Avg R:R", f"{mean_val:.2f}")
+                with col3:
+                    median_val = rr_series.median()
+                    st.metric("Median R:R", f"{median_val:.2f}")
+                with col4:
+                    max_val = rr_series.max()
+                    st.metric("Max R:R", f"{max_val:.2f}")
+            else:
+                st.info("No risk-reward ratio data available")
 
     with tab4:
         st.subheader("Raw Signal Data")

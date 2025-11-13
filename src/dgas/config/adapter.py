@@ -174,6 +174,27 @@ class UnifiedSettings:
             return self._dgas_config.prediction.target_atr_multiplier
         return 2.5
 
+    @property
+    def prediction_wait_for_fresh_data(self) -> bool:
+        """Get wait for fresh data setting."""
+        if self._dgas_config:
+            return self._dgas_config.prediction.wait_for_fresh_data
+        return True  # Default
+
+    @property
+    def prediction_max_wait_minutes(self) -> int:
+        """Get maximum wait time for fresh data."""
+        if self._dgas_config:
+            return self._dgas_config.prediction.max_wait_minutes
+        return 5  # Default
+
+    @property
+    def prediction_freshness_threshold_minutes(self) -> int:
+        """Get freshness threshold in minutes."""
+        if self._dgas_config:
+            return self._dgas_config.prediction.freshness_threshold_minutes
+        return 15  # Default
+
     # Notification properties
     @property
     def notifications_discord_enabled(self) -> bool:
@@ -239,6 +260,15 @@ class UnifiedSettings:
         if self._dgas_config:
             return self._dgas_config.dashboard.auto_refresh_seconds
         return 30
+
+    # Data collection properties
+    @property
+    def data_collection(self):
+        """Get data collection configuration."""
+        if self._dgas_config:
+            return self._dgas_config.data_collection
+        # Return None if no config - CLI will use defaults
+        return None
 
     # Legacy Settings pass-through
     @property

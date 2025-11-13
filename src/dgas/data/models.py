@@ -80,7 +80,7 @@ class IntervalData(BaseModel):
         This ensures all timestamps are stored in UTC.
 
         Args:
-            value: Timestamp value (string, datetime, etc.)
+            value: Timestamp value (string, datetime, int, float, etc.)
 
         Returns:
             UTC datetime
@@ -99,6 +99,15 @@ class IntervalData(BaseModel):
             # If naive, assume it's in Europe/Prague and convert to UTC
             else:
                 return value.replace(tzinfo=ZoneInfo("Europe/Prague")).astimezone(timezone.utc)
+
+        # Handle integer/float timestamps (Unix timestamp)
+        if isinstance(value, (int, float)):
+            # EODHD timestamps are in seconds or milliseconds depending on endpoint
+            if value > 10**12:
+                value = value / 1000.0
+            # Convert Unix timestamp to UTC datetime
+            dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
+            return dt
 
         # If it's a string, parse and convert
         if isinstance(value, str):
@@ -122,11 +131,17 @@ class IntervalData(BaseModel):
         if not symbol:
             raise ValueError("API record missing symbol identifier")
 
+        # Normalize symbol: remove .US suffix and convert to uppercase
+        # EODHD API uses unified "US" exchange code, so we strip the suffix
+        if symbol.endswith(".US"):
+            symbol = symbol[:-3]
+        symbol = symbol.upper()
+
         timestamp_raw = record.get("timestamp") or record.get("datetime") or record.get("date")
 
         data = {
             "symbol": symbol,
-            "exchange": record.get("exchange_short_name"),
+            "exchange": "US",  # Always use "US" as unified exchange code for EODHD
             "timestamp": cls._parse_timestamp_to_utc(timestamp_raw),
             "interval": interval,
             "open": record.get("open"),

@@ -70,6 +70,67 @@ def render() -> None:
 
     st.markdown("---")
 
+    # WebSocket Status (if available)
+    ws_status = system_status.get("websocket")
+    if ws_status:
+        st.subheader("WebSocket Data Collection")
+        if ws_status.get("enabled") is False:
+            st.info("WebSocket collection is disabled in configuration")
+        elif ws_status.get("enabled") is None:
+            st.warning(f"WebSocket status unavailable: {ws_status.get('error', 'Unknown error')}")
+        else:
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                if ws_status.get("connected"):
+                    st.success("🟢 Connected", icon="✅")
+                else:
+                    st.error("🔴 Disconnected", icon="❌")
+            
+            with col2:
+                st.metric(
+                    "Connections",
+                    f"{ws_status.get('connected_count', 0)}/{ws_status.get('connections', 0)}",
+                    help="Active WebSocket connections"
+                )
+            
+            with col3:
+                st.metric(
+                    "Symbols",
+                    ws_status.get("total_symbols", 0),
+                    help="Total symbols subscribed"
+                )
+            
+            with col4:
+                st.metric(
+                    "Messages",
+                    format(ws_status.get("messages_received", 0), ","),
+                    help="Total messages received"
+                )
+            
+            # Additional metrics
+            col5, col6 = st.columns(2)
+            with col5:
+                st.metric(
+                    "Bars Buffered",
+                    ws_status.get("bars_buffered", 0),
+                    help="Bars waiting to be stored"
+                )
+            with col6:
+                st.metric(
+                    "Bars Stored",
+                    format(ws_status.get("bars_stored", 0), ","),
+                    help="Total bars stored from WebSocket"
+                )
+            
+            # Connection details
+            if ws_status.get("client_status"):
+                with st.expander("Connection Details"):
+                    import json
+                    st.json(ws_status.get("client_status", {}))
+
+    st.markdown("---")
+
     # Database status
     st.subheader("Database Status")
     db_status = system_status.get("database", {})
@@ -119,8 +180,14 @@ def render() -> None:
 
         with col2:
             # Progress bar for coverage
-            st.progress(symbols_24h / 100 if symbols_24h > 0 else 0)
-            st.caption("Data freshness indicator")
+            # Calculate percentage based on total symbols, clamp to [0.0, 1.0]
+            total_symbols = db_status.get("symbols", 519)  # Default to 519 if not available
+            if total_symbols > 0:
+                progress_value = min(symbols_24h / total_symbols, 1.0)
+            else:
+                progress_value = 0.0
+            st.progress(progress_value)
+            st.caption(f"Data freshness indicator ({symbols_24h}/{total_symbols} symbols)")
     else:
         st.warning("Data coverage information not available")
 

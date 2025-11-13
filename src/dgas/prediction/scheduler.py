@@ -76,6 +76,11 @@ class SchedulerConfig:
     max_symbols_per_cycle: int = 50  # Limit for performance
     timeout_seconds: int = 180  # Max cycle duration
 
+    # Data freshness coordination
+    wait_for_fresh_data: bool = True  # Wait for data collection to complete
+    max_wait_minutes: int = 5  # Maximum time to wait for fresh data (0 = skip if stale)
+    freshness_threshold_minutes: int = 15  # Maximum data age to consider fresh
+
     # Operational
     run_on_startup: bool = True  # Execute immediately on start
     catch_up_on_startup: bool = True  # Analyze missed intervals
@@ -457,12 +462,17 @@ class PredictionScheduler:
         )
 
     def _execute_if_market_open(self) -> None:
-        """Execute cycle only if market is open."""
+        """
+        Execute cycle with data refresh always, signal generation only during market hours.
+        
+        This ensures data stays fresh 24/7, while signals are only generated during
+        market hours when they're actionable.
+        
+        Checks data freshness before generating signals to ensure WebSocket data
+        collection has completed. Waits for fresh data if configured.
+        """
         if self._shutdown_event.is_set():
-            return
-
-        if not self.market_hours.is_market_open():
-            logger.debug("Market is closed, skipping prediction cycle")
+            logger.debug("Shutdown event set, skipping prediction cycle")
             return
 
         # Acquire lock to prevent concurrent executions
@@ -471,28 +481,275 @@ class PredictionScheduler:
             return
 
         try:
-            self._execute_cycle()
+            market_open = self.market_hours.is_market_open()
+            
+            if market_open:
+                # Check data freshness before generating signals
+                # WebSocket collection should be providing fresh data
+                freshness_threshold = self.config.freshness_threshold_minutes
+                
+                if self.config.wait_for_fresh_data:
+                    # Wait for fresh data with timeout
+                    data_fresh = self._wait_for_fresh_data(
+                        max_wait_minutes=self.config.max_wait_minutes,
+                        freshness_threshold_minutes=freshness_threshold,
+                    )
+                    
+                    if not data_fresh:
+                        if self.config.max_wait_minutes == 0:
+                            logger.warning(
+                                f"Data not fresh (threshold: {freshness_threshold}min) and max_wait=0, "
+                                "skipping signal generation"
+                            )
+                            return
+                        else:
+                            logger.warning(
+                                f"Data still not fresh after waiting {self.config.max_wait_minutes} minutes, "
+                                "proceeding with signal generation anyway"
+                            )
+                    else:
+                        logger.info("Data is fresh, proceeding with signal generation")
+                else:
+                    # Just check without waiting
+                    if not self._is_data_fresh(max_age_minutes=freshness_threshold):
+                        logger.warning(
+                            f"Data may be stale (threshold: {freshness_threshold}min) - "
+                            "WebSocket collection may not be active. Proceeding anyway."
+                        )
+                
+                logger.info("Starting prediction cycle (market is open - signal generation only)")
+                # Full cycle: signal generation only (data assumed fresh from collection service)
+                self._execute_cycle()
+            else:
+                logger.info("Skipping prediction cycle (market is closed)")
+                # Market closed: skip signal generation
+                # Data collection service handles data updates 24/7 independently
+                
         except Exception as e:
             logger.error(f"Error executing prediction cycle: {e}", exc_info=True)
         finally:
             self._execution_lock.release()
 
+    def _is_data_fresh(self, max_age_minutes: int = 15) -> bool:
+        """
+        Check if data is fresh (recently updated by collection service).
+
+        Args:
+            max_age_minutes: Maximum age in minutes to consider fresh
+
+        Returns:
+            True if data appears fresh
+        """
+        from datetime import datetime, timezone
+        from ..data.repository import get_latest_timestamp, ensure_market_symbol
+        from ..db import get_connection
+
+        # Check a sample of symbols (larger sample for better accuracy)
+        sample_size = min(20, len(self.config.symbols))
+        sample_symbols = self.config.symbols[:sample_size]
+
+        now = datetime.now(timezone.utc)
+        stale_count = 0
+        fresh_count = 0
+        no_data_count = 0
+
+        try:
+            with get_connection() as conn:
+                for symbol in sample_symbols:
+                    try:
+                        symbol_id = ensure_market_symbol(conn, symbol, "US")
+                        latest_ts = get_latest_timestamp(conn, symbol_id, "30m")
+
+                        if latest_ts:
+                            age_minutes = (now - latest_ts).total_seconds() / 60.0
+                            if age_minutes > max_age_minutes:
+                                stale_count += 1
+                            else:
+                                fresh_count += 1
+                        else:
+                            # No data - consider stale
+                            no_data_count += 1
+                            stale_count += 1
+                    except Exception as e:
+                        # Error checking - assume stale
+                        logger.debug(f"Error checking freshness for {symbol}: {e}")
+                        stale_count += 1
+
+            # Consider fresh if >= 70% of sample is fresh (more strict than before)
+            freshness_ratio = fresh_count / sample_size if sample_size > 0 else 0.0
+            is_fresh = freshness_ratio >= 0.7
+            
+            logger.debug(
+                f"Data freshness check: {fresh_count} fresh, {stale_count} stale, "
+                f"{no_data_count} no data, ratio={freshness_ratio:.2%}, threshold={max_age_minutes}min"
+            )
+            
+            return is_fresh
+        except Exception as e:
+            logger.warning(f"Error checking data freshness: {e}")
+            # On error, assume fresh (don't block signal generation)
+            return True
+
+    def _wait_for_fresh_data(
+        self,
+        max_wait_minutes: int = 5,
+        freshness_threshold_minutes: int = 15,
+        check_interval_seconds: int = 10,
+    ) -> bool:
+        """
+        Wait for data to become fresh, with timeout.
+
+        Args:
+            max_wait_minutes: Maximum time to wait (0 = don't wait, just check)
+            freshness_threshold_minutes: Maximum age to consider fresh
+            check_interval_seconds: How often to check freshness
+
+        Returns:
+            True if data became fresh, False if timeout
+        """
+        import time
+        
+        if max_wait_minutes == 0:
+            # Just check once, don't wait
+            return self._is_data_fresh(max_age_minutes=freshness_threshold_minutes)
+        
+        start_time = time.time()
+        max_wait_seconds = max_wait_minutes * 60
+        check_count = 0
+        
+        logger.info(
+            f"Waiting for fresh data (max {max_wait_minutes}min, "
+            f"threshold: {freshness_threshold_minutes}min, check every {check_interval_seconds}s)"
+        )
+        
+        while time.time() - start_time < max_wait_seconds:
+            check_count += 1
+            
+            if self._is_data_fresh(max_age_minutes=freshness_threshold_minutes):
+                elapsed = time.time() - start_time
+                logger.info(
+                    f"Data is fresh after {elapsed:.1f}s ({check_count} checks)"
+                )
+                return True
+            
+            # Wait before next check
+            if time.time() - start_time + check_interval_seconds < max_wait_seconds:
+                time.sleep(check_interval_seconds)
+        
+        # Timeout
+        elapsed = time.time() - start_time
+        logger.warning(
+            f"Timeout waiting for fresh data after {elapsed:.1f}s ({check_count} checks)"
+        )
+        return False
+
+    def _execute_data_refresh_only(self) -> None:
+        """
+        Execute data refresh only (no signal generation).
+        
+        NOTE: This method is deprecated. Data refresh is now handled by the
+        separate data collection service. This method is kept for backward
+        compatibility but does nothing. The data collection service runs
+        24/7 and keeps data fresh independently.
+        """
+        logger.info(
+            "Data refresh skipped - handled by separate data collection service. "
+            "Prediction scheduler now assumes data is fresh."
+        )
+
     def _execute_cycle(self) -> PredictionRunResult:
         """Execute full prediction pipeline with notifications."""
         import time
+        # Ensure .env is loaded before loading notification config
+        # (NotificationConfig.from_env() will also load it, but this ensures it's available)
+        try:
+            from dotenv import load_dotenv
+            from pathlib import Path
+            env_path = Path(__file__).parent.parent.parent / ".env"
+            if env_path.exists():
+                load_dotenv(env_path)
+        except ImportError:
+            pass  # python-dotenv not installed
+        except Exception:
+            pass  # Ignore errors loading .env
+        
         from .notifications import NotificationConfig, NotificationRouter
         from .notifications.adapters import DiscordAdapter, ConsoleAdapter
 
-        logger.info("Executing prediction cycle")
+        logger.info("Executing prediction cycle (full cycle with signals)")
 
         try:
-            # Execute via engine
-            result = self.engine.execute_prediction_cycle(
-                symbols=self.config.symbols[:self.config.max_symbols_per_cycle],
-                interval=self.config.interval,
-                timeframes=self.config.enabled_timeframes,
-                persist_results=False,  # We'll persist after adding notification metadata
-            )
+            # Execute via engine - process all symbols in batches
+            all_results = []
+            all_signals = []
+            total_symbols_processed = 0
+            total_execution_time = 0
+            
+            # Process symbols in batches
+            for batch_start in range(0, len(self.config.symbols), self.config.max_symbols_per_cycle):
+                batch_symbols = self.config.symbols[batch_start:batch_start + self.config.max_symbols_per_cycle]
+                logger.info(f"Processing batch {batch_start // self.config.max_symbols_per_cycle + 1}: {len(batch_symbols)} symbols")
+                
+                # Execute via engine
+                batch_result = self.engine.execute_prediction_cycle(
+                    symbols=batch_symbols,
+                    interval="30m",  # Data interval (30m bars)
+                    timeframes=self.config.enabled_timeframes,
+                    htf_interval="30m",  # HTF interval
+                    trading_interval="30m",  # Trading interval
+                    persist_results=False,  # We'll persist after adding notification metadata
+                )
+                
+                all_results.append(batch_result)
+                all_signals.extend(batch_result.signals or [])
+                total_symbols_processed += batch_result.symbols_processed
+                total_execution_time += batch_result.execution_time_ms
+            
+            # Combine results
+            if all_results:
+                # Use first result as base and update with combined metrics
+                from dataclasses import replace
+                first_result = all_results[0]
+                
+                # Combine all errors
+                all_errors = []
+                for r in all_results:
+                    all_errors.extend(r.errors or [])
+                
+                # Sum up timing metrics
+                total_data_fetch_ms = sum(r.data_fetch_ms for r in all_results)
+                total_indicator_calc_ms = sum(r.indicator_calc_ms for r in all_results)
+                total_signal_gen_ms = sum(r.signal_generation_ms for r in all_results)
+                
+                result = replace(
+                    first_result,
+                    symbols_processed=total_symbols_processed,
+                    signals_generated=len(all_signals),
+                    execution_time_ms=total_execution_time,
+                    signals=all_signals,
+                    errors=all_errors,
+                    data_fetch_ms=total_data_fetch_ms,
+                    indicator_calc_ms=total_indicator_calc_ms,
+                    signal_generation_ms=total_signal_gen_ms,
+                    status="SUCCESS" if total_symbols_processed > 0 else "FAILED",
+                )
+            else:
+                # No results, create empty result
+                from .engine import PredictionRunResult
+                result = PredictionRunResult(
+                    run_id=None,
+                    timestamp=datetime.now(timezone.utc),
+                    symbols_requested=len(self.config.symbols),
+                    symbols_processed=0,
+                    signals_generated=0,
+                    execution_time_ms=0,
+                    status="FAILED",
+                    data_fetch_ms=0,
+                    indicator_calc_ms=0,
+                    signal_generation_ms=0,
+                    errors=["No symbols to process"],
+                    signals=[],
+                )
 
             # Send notifications if signals were generated
             notification_ms = 0
@@ -507,16 +764,10 @@ class PredictionScheduler:
                     # Load notification configuration
                     notif_config = NotificationConfig.from_env()
 
-                    # Initialize enabled adapters
+                    # Initialize enabled adapters (Discord only - primary channel)
                     adapters = {}
 
-                    if "console" in notif_config.enabled_channels:
-                        adapters["console"] = ConsoleAdapter(
-                            max_signals=notif_config.console_max_signals,
-                            output_format=notif_config.console_format,
-                        )
-                        logger.debug("Console adapter initialized")
-
+                    # Discord is the primary and only notification channel
                     if "discord" in notif_config.enabled_channels:
                         if notif_config.discord_bot_token and notif_config.discord_channel_id:
                             adapters["discord"] = DiscordAdapter(
@@ -524,13 +775,24 @@ class PredictionScheduler:
                                 channel_id=notif_config.discord_channel_id,
                                 # Note: min_confidence filtering is done by NotificationRouter
                             )
-                            logger.debug("Discord adapter initialized")
+                            logger.info("Discord adapter initialized - Discord is the primary notification channel")
                         else:
-                            logger.warning("Discord enabled but token/channel ID missing")
+                            logger.error("Discord enabled but token/channel ID missing - notifications will fail!")
+                    
+                    # Console adapter removed - Discord is the only channel
+                    # Console logging is handled by Python logging, not notifications
 
                     # Send notifications if we have adapters and signals
+                    sorted_signals = None  # Initialize for scope
                     if adapters and result.signals:
                         router = NotificationRouter(notif_config, adapters)
+
+                        # Sort signals by timestamp (chronological order) before sending
+                        # This ensures alerts are sent in the order they were generated
+                        sorted_signals = sorted(
+                            result.signals,
+                            key=lambda s: s.signal_timestamp
+                        )
 
                         # Prepare run metadata
                         run_metadata = {
@@ -540,9 +802,9 @@ class PredictionScheduler:
                             "interval": self.config.interval,
                         }
 
-                        # Send notifications
+                        # Send notifications (signals are now in chronological order)
                         delivery_results = router.send_notifications(
-                            signals=result.signals,
+                            signals=sorted_signals,
                             run_metadata=run_metadata,
                         )
 
@@ -555,9 +817,9 @@ class PredictionScheduler:
                                 logger.error(error_msg)
                                 notification_errors.append(error_msg)
 
-                        # Get notification metadata for signals
+                        # Get notification metadata for signals (use sorted signals)
                         notification_metadata = router.get_notification_metadata(
-                            signals=result.signals,
+                            signals=sorted_signals,
                             delivery_results=delivery_results,
                         )
                     else:
@@ -599,10 +861,12 @@ class PredictionScheduler:
                     # Save signals with notification metadata
                     if result.signals:
                         # Convert signals to dicts and merge notification metadata
+                        # Use sorted_signals if available (for proper ordering)
+                        signals_to_save = sorted_signals if sorted_signals is not None else result.signals
                         from ..prediction.engine import GeneratedSignal
 
                         signal_dicts = []
-                        for signal in result.signals:
+                        for signal in signals_to_save:
                             # Convert signal to dict (using engine's helper method)
                             signal_dict = {
                                 "symbol": signal.symbol,

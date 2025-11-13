@@ -1,0 +1,104 @@
+# DGAS Production Configuration
+# Deployed: 2025-11-10
+# Purpose: 24/7 market analysis and signal generation for 517 US stocks
+
+database:
+  url: ${DGAS_DATABASE_URL}
+  pool_size: 10  # Optimized for 3 CPUs
+  echo: false
+
+scheduler:
+  # Production: Monitor continuously during and after market hours
+  # Market hours: Every 15 minutes during trading (9:30am-4pm ET, Mon-Fri)
+  # After hours: Every 60 minutes (for gap analysis and preparation)
+  # Note: Cron runs every 15 minutes all days; scheduler checks market hours internally
+  cron_expression: "*/15 * * * *"  # Every 15 minutes, all days (scheduler checks market hours)
+  timezone: America/New_York
+  market_hours_only: false  # Run 24/7 to catch pre-market and after-hours activity
+
+  # All 517 symbols will be loaded from the database dynamically
+  # Using a placeholder symbol to satisfy schema validation (will be replaced by database query)
+  symbols: ["AAPL"]  # Placeholder - actual symbols loaded from database
+
+  # Use 30m for both HTF and Trading (we don't have 1h data yet)
+  htf_interval: "30m"
+  trading_interval: "30m"
+
+prediction:
+  # Signal quality thresholds
+  min_confidence: 0.65  # Only signals with 65%+ confidence
+  min_signal_strength: 0.60  # Minimum signal strength of 0.60
+
+  # Risk management parameters
+  stop_loss_atr_multiplier: 1.5  # Stop loss at 1.5x ATR
+  target_atr_multiplier: 2.5  # Target at 2.5x ATR (1:1.67 risk/reward)
+
+  # Data freshness coordination
+  wait_for_fresh_data: true  # Wait for data collection to complete before generating signals
+  max_wait_minutes: 5  # Maximum time to wait for fresh data (0 = skip if stale)
+  freshness_threshold_minutes: 15  # Maximum data age to consider fresh (minutes)
+
+notifications:
+  discord:
+    enabled: true
+    # Using bot token and channel ID from .env:
+    # - DGAS_DISCORD_BOT_TOKEN
+    # - DGAS_DISCORD_CHANNEL_ID
+
+  console:
+    enabled: false  # Discord is primary channel, console disabled
+
+monitoring:
+  # SLA targets for production
+  sla_p95_latency_ms: 1000  # 1000ms P95 latency per prediction cycle (schema minimum)
+  sla_error_rate_pct: 5.0  # <5% error rate
+  sla_uptime_pct: 99.0  # 99% uptime
+
+dashboard:
+  port: 8501
+  theme: dark  # Dark theme for trading dashboard
+  auto_refresh_seconds: 30  # Refresh every 30 seconds
+
+# Additional production settings
+eodhd:
+  # API settings (from environment variables)
+  api_token: ${EODHD_API_TOKEN}
+  requests_per_minute: 80  # Free tier limit
+
+data:
+  # Data directory for local storage
+  data_dir: ${DGAS_DATA_DIR}
+
+data_collection:
+  # Data collection service configuration
+  enabled: true
+  
+  # WebSocket real-time data collection
+  use_websocket: true             # Use WebSocket for real-time data during market hours
+  websocket_interval: "30m"       # Interval for WebSocket bar aggregation
+  
+  # Collection intervals (for REST API fallback/after-hours)
+  # Note: Using 30m for all intervals since 5m may not be available from API
+  # and most symbols already have 30m data
+  interval_market_hours: "30m"    # During 9:30am-4pm ET, Mon-Fri (REST fallback only)
+  interval_after_hours: "30m"     # After 4pm or before 9:30am, Mon-Fri
+  interval_weekends: "30m"        # Saturday and Sunday
+  
+  # Batch processing (for REST API)
+  batch_size: 50                  # Symbols per batch
+  max_concurrent_batches: 1       # Sequential processing (safer)
+  delay_between_batches: 2.0      # Seconds between batches
+  
+  # Rate limiting (for REST API)
+  requests_per_minute: 80         # EODHD API limit
+  rate_limit_buffer: 0.1         # 10% safety buffer (use 72 req/min)
+  
+  # Error handling
+  max_retries: 3                  # Retry attempts per symbol
+  retry_delay_seconds: 5         # Initial retry delay (exponential backoff)
+  error_threshold_pct: 10.0      # Alert if >10% symbols fail
+  
+  # Monitoring
+  log_collection_stats: true     # Log detailed stats
+  track_freshness: true          # Track data age
+  health_check_interval: 60      # Health check every 60 seconds

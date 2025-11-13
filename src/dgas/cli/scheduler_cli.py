@@ -13,6 +13,7 @@ import sys
 import time
 from argparse import ArgumentParser, Namespace
 from datetime import datetime
+from datetime import time as dt_time
 from pathlib import Path
 from typing import Optional
 
@@ -167,20 +168,41 @@ def _start_scheduler(args: Namespace) -> int:
         engine = PredictionEngine(legacy_settings)
         performance_tracker = PerformanceTracker(persistence)
 
-        # Create scheduler config from unified settings
+        # Load symbols - if empty in config, load all active symbols from database
+        symbols = unified_settings.scheduler_symbols
+        if not symbols:
+            console.print("[cyan]No symbols in config, loading all active symbols from database...[/cyan]")
+            from dgas.db import get_connection
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT symbol FROM market_symbols WHERE is_active = true ORDER BY symbol")
+                    symbols = [row[0] for row in cur.fetchall()]
+            console.print(f"[green]Loaded {len(symbols)} symbols from database[/green]")
+
+        # Parse cron expression to interval
+        # For now, we'll use the interval from config or default to 30min
+        # The cron expression "*/15 * * * 1-5" means every 15 minutes on weekdays
+        interval = "15min"  # Default, can be overridden from config
+
+        # Create scheduler config
         config = SchedulerConfig(
-            prediction_symbols=unified_settings.scheduler_symbols or ["AAPL", "MSFT", "GOOGL"],
-            cron_expression=unified_settings.scheduler_cron,
-            timezone=unified_settings.scheduler_timezone,
-            market_hours_only=unified_settings.scheduler_market_hours_only,
-            trading_sessions=[
-                TradingSession(
-                    name="US_REGULAR",
-                    start_time="09:30",
-                    end_time="16:00",
-                    days=[0, 1, 2, 3, 4],  # Mon-Fri
-                )
-            ],
+            interval=interval,
+            symbols=symbols,
+            exchange_code="US",
+            trading_session=TradingSession(
+                market_open=dt_time(9, 30),
+                market_close=dt_time(16, 0),
+                timezone=unified_settings.scheduler_timezone or "America/New_York",
+            ),
+            min_confidence=unified_settings.prediction_min_confidence,
+            min_signal_strength=unified_settings.prediction_min_signal_strength,
+            enabled_timeframes=["30m"],  # Using 30m for both HTF and trading
+            max_symbols_per_cycle=50,  # Process in batches
+            wait_for_fresh_data=unified_settings.prediction_wait_for_fresh_data,
+            max_wait_minutes=unified_settings.prediction_max_wait_minutes,
+            freshness_threshold_minutes=unified_settings.prediction_freshness_threshold_minutes,
+            run_on_startup=True,
+            catch_up_on_startup=True,
         )
 
         # Create scheduler
@@ -188,7 +210,7 @@ def _start_scheduler(args: Namespace) -> int:
             config=config,
             engine=engine,
             persistence=persistence,
-            settings=settings,
+            settings=legacy_settings,
             performance_tracker=performance_tracker,
         )
 

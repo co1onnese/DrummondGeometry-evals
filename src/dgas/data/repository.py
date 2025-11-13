@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from decimal import Decimal
 from typing import Iterable, Sequence
@@ -10,6 +11,81 @@ import psycopg
 from psycopg import Connection
 
 from .models import IntervalData
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _normalize_ohlc(bar: IntervalData) -> IntervalData:
+    """
+    Normalize OHLC values to satisfy database constraints.
+    
+    During market hours, live data may contain incomplete bars where:
+    - close > high (price moved up but high hasn't updated yet)
+    - close < low (price moved down but low hasn't updated yet)
+    
+    This function adjusts high/low to accommodate the close price,
+    ensuring the bar satisfies the chk_ohlc_relationships constraint.
+    
+    Args:
+        bar: IntervalData bar that may have invalid OHLC relationships
+        
+    Returns:
+        Normalized IntervalData with valid OHLC relationships
+    """
+    open_price = bar.open
+    high_price = bar.high
+    low_price = bar.low
+    close_price = bar.close
+    
+    original_high = high_price
+    original_low = low_price
+    normalized = False
+    
+    # Adjust high to be at least as high as open and close
+    if high_price < open_price or high_price < close_price:
+        high_price = max(high_price, open_price, close_price)
+        normalized = True
+    
+    # Adjust low to be at least as low as open and close
+    if low_price > open_price or low_price > close_price:
+        low_price = min(low_price, open_price, close_price)
+        normalized = True
+    
+    # Ensure high - low >= |open - close| (range constraint)
+    # This constraint ensures the bar's range is at least as wide as the open-close movement
+    price_range = abs(open_price - close_price)
+    current_range = high_price - low_price
+    if current_range < price_range:
+        # Expand the range symmetrically around the midpoint of open and close
+        # This ensures we maintain high >= max(open, close) and low <= min(open, close)
+        midpoint = (open_price + close_price) / 2
+        half_range = price_range / 2
+        high_price = max(high_price, midpoint + half_range)
+        low_price = min(low_price, midpoint - half_range)
+        normalized = True
+    
+    # Log normalization if it occurred (debug level to avoid spam)
+    if normalized:
+        LOGGER.debug(
+            f"{bar.symbol} {bar.timestamp}: Normalized OHLC - "
+            f"high: {original_high} -> {high_price}, "
+            f"low: {original_low} -> {low_price}"
+        )
+    
+    # Create new IntervalData with normalized values
+    # Since IntervalData is frozen, we need to create a new instance
+    return IntervalData(
+        symbol=bar.symbol,
+        exchange=bar.exchange,
+        timestamp=bar.timestamp,
+        interval=bar.interval,
+        open=open_price,
+        high=high_price,
+        low=low_price,
+        close=close_price,
+        adjusted_close=bar.adjusted_close,
+        volume=bar.volume,
+    )
 
 
 def ensure_market_symbol(
@@ -23,7 +99,18 @@ def ensure_market_symbol(
     market_cap: float | None = None,
     is_active: bool = True,
 ) -> int:
-    """Insert or update a market symbol and return its identifier."""
+    """Insert or update a market symbol and return its identifier.
+    
+    Normalizes symbols by removing .US suffix and always uses "US" as exchange code.
+    """
+
+    # Normalize symbol: remove .US suffix and convert to uppercase
+    if symbol.endswith(".US"):
+        symbol = symbol[:-3]
+    symbol = symbol.upper()
+    
+    # Always use "US" as exchange code for EODHD unified exchange
+    exchange = "US"
 
     with conn.cursor() as cur:
         cur.execute(
@@ -38,7 +125,12 @@ def ensure_market_symbol(
                 sector = COALESCE(EXCLUDED.sector, market_symbols.sector),
                 industry = COALESCE(EXCLUDED.industry, market_symbols.industry),
                 market_cap = COALESCE(EXCLUDED.market_cap, market_symbols.market_cap),
-                is_active = EXCLUDED.is_active,
+                -- Preserve existing is_active status unless explicitly provided (not default True)
+                -- This prevents data collection from reactivating deactivated symbols
+                is_active = CASE 
+                    WHEN EXCLUDED.is_active = true AND market_symbols.is_active = false THEN market_symbols.is_active
+                    ELSE EXCLUDED.is_active
+                END,
                 updated_at = NOW()
             RETURNING symbol_id;
             """,
@@ -64,10 +156,19 @@ def bulk_upsert_market_data(
     interval: str,
     data: Sequence[IntervalData],
 ) -> int:
-    """Insert or update OHLCV bars for a symbol."""
+    """
+    Insert or update OHLCV bars for a symbol.
+    
+    Automatically normalizes OHLC values to satisfy database constraints.
+    This is especially important for live/intraday data during market hours
+    where incomplete bars may violate OHLC relationships.
+    """
 
     if not data:
         return 0
+
+    # Normalize OHLC values to satisfy database constraints
+    normalized_data = [_normalize_ohlc(bar) for bar in data]
 
     records = [
         (
@@ -82,7 +183,7 @@ def bulk_upsert_market_data(
             None,
             None,
         )
-        for row in data
+        for row in normalized_data
     ]
 
     insert_sql = """

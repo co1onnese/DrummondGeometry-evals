@@ -15,6 +15,20 @@ import streamlit as st
 from dgas.config import load_settings
 
 
+def format_number(value: float, precision: int = 2) -> str:
+    """Format a number with specified precision."""
+    if value is None:
+        return "0.00"
+    return f"{value:.{precision}f}"
+
+
+def format_percentage(value: float, precision: int = 2) -> str:
+    """Format a number as a percentage."""
+    if value is None:
+        return "0.00%"
+    return f"{value:.{precision}f}%"
+
+
 def get_config_file_path() -> Optional[Path]:
     """
     Get configuration file path from query params or default locations.
