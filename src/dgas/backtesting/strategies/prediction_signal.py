@@ -114,8 +114,11 @@ class PredictionSignalStrategy(BaseStrategy):
                 trading_tf_data=trading_tf_data,
                 ltf_data=None,  # Lower timeframe not used in portfolio backtest
             )
-        except Exception:
-            # If signal generation fails, return no signals
+        except Exception as e:
+            # Log the exception for debugging
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.debug(f"{context.symbol}: Signal generation failed: {e}", exc_info=True)
             return []
 
         # Convert GeneratedSignal objects to backtesting Signal objects

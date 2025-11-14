@@ -510,7 +510,9 @@ def print_summary(result: PortfolioBacktestResult, performance: any) -> None:
         print(f"\nSignal Accuracy:")
         print(f"  Total Signals: {signal_accuracy.get('total_signals', 0)}")
         print(f"  Executed Signals: {signal_accuracy.get('executed_signals', 0)}")
-        print(f"  Win Rate: {signal_accuracy.get('win_rate', 0):.1%}")
+        win_rate_val = signal_accuracy.get('win_rate')
+        win_rate_str = f"{win_rate_val:.1%}" if win_rate_val is not None else "N/A"
+        print(f"  Win Rate: {win_rate_str}")
     
     print(f"\n{'='*80}\n")
 

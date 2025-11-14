@@ -181,8 +181,14 @@ class PortfolioBacktestEngine:
         self.strategy.prepare(all_bars)
 
         # Pre-load HTF data for all symbols (for indicator calculation)
+        # Need to load HTF data with lookback before start date for indicator calculation
+        # For 1d HTF, we need at least 30 days of lookback for proper analysis
+        from datetime import timedelta
+        htf_lookback_days = 30
+        htf_start = start - timedelta(days=htf_lookback_days) if start else None
         print("\nPre-loading HTF data for indicator calculation...")
-        self.indicator_calculator.preload_htf_data_for_portfolio(symbols, start, end)
+        print(f"  Loading HTF data from {htf_start.date() if htf_start else 'start'} to {end.date() if end else 'end'} (with {htf_lookback_days} day lookback)")
+        self.indicator_calculator.preload_htf_data_for_portfolio(symbols, htf_start, end)
         cache_stats = self.indicator_calculator.get_cache_stats()
         print(f"✓ HTF cache ready: {cache_stats['total_htf_bars']:,} bars\n")
 

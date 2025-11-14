@@ -134,14 +134,25 @@ class SignalGenerator:
 
         # Check if analysis meets minimum criteria
         if not self._meets_minimum_criteria(analysis):
+            # Log why criteria not met for debugging
+            logger.debug(
+                f"{symbol}: Criteria not met - "
+                f"alignment={float(analysis.alignment.alignment_score):.2f} (min={self.min_alignment_score}), "
+                f"strength={float(analysis.signal_strength):.2f} (min={self.min_signal_strength}), "
+                f"trade_permitted={analysis.alignment.trade_permitted}, "
+                f"zones={len(analysis.confluence_zones)}, "
+                f"top_zone_weight={float(analysis.confluence_zones[0].weighted_strength) if analysis.confluence_zones else 0:.2f} (min={self.min_zone_weight})"
+            )
             return []
 
         direction = self._determine_direction(analysis)
         if direction is None:
+            logger.debug(f"{symbol}: No direction determined - recommended_action={analysis.recommended_action}, htf_trend={analysis.htf_trend}")
             return []
 
         signal_type = self._map_direction_to_signal(direction, analysis)
         if signal_type is None:
+            logger.debug(f"{symbol}: No signal type mapped - direction={direction}, recommended_action={analysis.recommended_action}")
             return []
 
         is_exit_signal = signal_type in (SignalType.EXIT_LONG, SignalType.EXIT_SHORT)
@@ -149,9 +160,11 @@ class SignalGenerator:
         zone: Optional[ConfluenceZone] = None
         if not is_exit_signal:
             if not self._has_supporting_pattern(analysis, direction):
+                logger.debug(f"{symbol}: No supporting pattern found - direction={direction}, required_strength={self.required_pattern_strength}")
                 return []
             zone = self._select_zone(analysis, direction)
             if zone is None:
+                logger.debug(f"{symbol}: No zone selected - direction={direction}, min_weight={self.min_zone_weight}")
                 return []
 
         # Calculate entry, stop, and target levels
