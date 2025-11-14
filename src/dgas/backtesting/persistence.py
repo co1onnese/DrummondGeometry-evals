@@ -106,15 +106,50 @@ def persist_backtest(
 
 
 def _build_test_config(result: BacktestResult, metadata: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    """Build test config dict, converting non-JSON-serializable types."""
     base = asdict(result.config)
     # Convert Decimal values to float for JSON serialization
     base = {k: (float(v) if isinstance(v, Decimal) else v) for k, v in base.items()}
-    base.update(result.metadata)
+    
+    # Convert result.metadata, handling nested structures
+    result_metadata_clean = _make_json_serializable(result.metadata)
+    base.update(result_metadata_clean)
+    
     if metadata:
-        # Also convert any Decimal values in metadata
-        metadata_clean = {k: (float(v) if isinstance(v, Decimal) else v) for k, v in metadata.items()}
+        # Also convert any non-serializable values in metadata
+        metadata_clean = _make_json_serializable(metadata)
         base.update(metadata_clean)
     return base
+
+
+def _make_json_serializable(obj: Any) -> Any:
+    """Recursively convert non-JSON-serializable types to serializable ones.
+    
+    Handles:
+    - Decimal -> float
+    - datetime -> ISO format string
+    - tuples -> lists
+    - nested dicts and lists
+    """
+    if isinstance(obj, Decimal):
+        return float(obj)
+    elif isinstance(obj, datetime):
+        return obj.isoformat()
+    elif isinstance(obj, dict):
+        return {k: _make_json_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [_make_json_serializable(item) for item in obj]
+    elif obj is None:
+        return None
+    else:
+        # Try to convert other types that might be serializable
+        # If it fails, return string representation
+        try:
+            import json
+            json.dumps(obj)
+            return obj
+        except (TypeError, ValueError):
+            return str(obj)
 
 
 def _persist_trades(cur, backtest_id: int, symbol_id: int, trades: Iterable[Trade]) -> None:
