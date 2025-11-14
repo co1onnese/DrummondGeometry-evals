@@ -83,9 +83,12 @@ def filter_to_regular_hours(
         # Get trading hours for this specific US date
         hours = calendar.get_trading_hours(exchange_code, us_date)
         if hours is None:
-            continue
-
-        market_open, market_close = hours
+            # Fallback to default US market hours (9:30 AM - 4:00 PM EST)
+            # This handles cases where calendar doesn't have hours for future dates
+            market_open = time(9, 30)
+            market_close = time(16, 0)
+        else:
+            market_open, market_close = hours
 
         # Check if bar is within US trading hours
         if market_open <= us_time_of_day < market_close:
