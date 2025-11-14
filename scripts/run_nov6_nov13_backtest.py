@@ -351,11 +351,15 @@ def write_results_to_file(
         # Performance Metrics
         f.write("## Performance Metrics\n\n")
         f.write(f"- **Total Return**: {performance.total_return:.2%}\n")
-        f.write(f"- **Annualized Return**: {performance.annualized_return:.2% if performance.annualized_return else 'N/A'}\n")
-        f.write(f"- **Sharpe Ratio**: {performance.sharpe_ratio:.2f if performance.sharpe_ratio else 'N/A'}\n")
-        f.write(f"- **Sortino Ratio**: {performance.sortino_ratio:.2f if performance.sortino_ratio else 'N/A'}\n")
+        annualized_str = f"{performance.annualized_return:.2%}" if performance.annualized_return is not None else "N/A"
+        sharpe_str = f"{performance.sharpe_ratio:.2f}" if performance.sharpe_ratio is not None else "N/A"
+        sortino_str = f"{performance.sortino_ratio:.2f}" if performance.sortino_ratio is not None else "N/A"
+        volatility_str = f"{performance.volatility:.2%}" if performance.volatility is not None else "N/A"
+        f.write(f"- **Annualized Return**: {annualized_str}\n")
+        f.write(f"- **Sharpe Ratio**: {sharpe_str}\n")
+        f.write(f"- **Sortino Ratio**: {sortino_str}\n")
         f.write(f"- **Max Drawdown**: {performance.max_drawdown:.2%}\n")
-        f.write(f"- **Volatility**: {performance.volatility:.2% if performance.volatility else 'N/A'}\n")
+        f.write(f"- **Volatility**: {volatility_str}\n")
         f.write(f"- **Net Profit**: ${performance.net_profit:,.2f}\n")
         f.write("\n")
         
@@ -458,8 +462,10 @@ def print_summary(result: PortfolioBacktestResult, performance: any) -> None:
     print(f"  Return:   {result.total_return:.2%}")
     
     print(f"\nPerformance Metrics:")
-    print(f"  Sharpe Ratio: {performance.sharpe_ratio:.2f if performance.sharpe_ratio else 'N/A'}")
-    print(f"  Sortino Ratio: {performance.sortino_ratio:.2f if performance.sortino_ratio else 'N/A'}")
+    sharpe_str = f"{performance.sharpe_ratio:.2f}" if performance.sharpe_ratio is not None else "N/A"
+    sortino_str = f"{performance.sortino_ratio:.2f}" if performance.sortino_ratio is not None else "N/A"
+    print(f"  Sharpe Ratio: {sharpe_str}")
+    print(f"  Sortino Ratio: {sortino_str}")
     print(f"  Max Drawdown: {performance.max_drawdown:.2%}")
     
     print(f"\nTrading Activity:")
