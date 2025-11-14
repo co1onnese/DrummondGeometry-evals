@@ -368,12 +368,13 @@ def write_results_to_file(
         f.write(f"- **Total Trades**: {performance.total_trades}\n")
         f.write(f"- **Winning Trades**: {performance.winning_trades}\n")
         f.write(f"- **Losing Trades**: {performance.losing_trades}\n")
-        f.write(f"- **Win Rate**: {performance.win_rate:.1%}\n")
-        if performance.avg_win:
+        win_rate_str = f"{performance.win_rate:.1%}" if performance.win_rate is not None else "N/A"
+        f.write(f"- **Win Rate**: {win_rate_str}\n")
+        if performance.avg_win is not None:
             f.write(f"- **Average Win**: ${performance.avg_win:,.2f}\n")
-        if performance.avg_loss:
+        if performance.avg_loss is not None:
             f.write(f"- **Average Loss**: ${performance.avg_loss:,.2f}\n")
-        if performance.profit_factor:
+        if performance.profit_factor is not None:
             f.write(f"- **Profit Factor**: {performance.profit_factor:.2f}\n")
         f.write("\n")
         
@@ -384,10 +385,21 @@ def write_results_to_file(
             f.write(f"- **Executed Signals**: {signal_accuracy.get('executed_signals', 0)}\n")
             f.write(f"- **Winning Signals**: {signal_accuracy.get('winning_signals', 0)}\n")
             f.write(f"- **Losing Signals**: {signal_accuracy.get('losing_signals', 0)}\n")
-            f.write(f"- **Win Rate**: {signal_accuracy.get('win_rate', 0):.1%}\n")
-            f.write(f"- **Avg Confidence (Winning)**: {signal_accuracy.get('avg_confidence_winning', 0):.1%}\n")
-            f.write(f"- **Avg Confidence (Losing)**: {signal_accuracy.get('avg_confidence_losing', 0):.1%}\n")
-            f.write(f"- **Avg Confidence (All)**: {signal_accuracy.get('avg_confidence_all', 0):.1%}\n")
+            win_rate_val = signal_accuracy.get('win_rate')
+            win_rate_str = f"{win_rate_val:.1%}" if win_rate_val is not None else "N/A"
+            f.write(f"- **Win Rate**: {win_rate_str}\n")
+            
+            avg_conf_win = signal_accuracy.get('avg_confidence_winning')
+            avg_conf_win_str = f"{avg_conf_win:.1%}" if avg_conf_win is not None else "N/A"
+            f.write(f"- **Avg Confidence (Winning)**: {avg_conf_win_str}\n")
+            
+            avg_conf_lose = signal_accuracy.get('avg_confidence_losing')
+            avg_conf_lose_str = f"{avg_conf_lose:.1%}" if avg_conf_lose is not None else "N/A"
+            f.write(f"- **Avg Confidence (Losing)**: {avg_conf_lose_str}\n")
+            
+            avg_conf_all = signal_accuracy.get('avg_confidence_all')
+            avg_conf_all_str = f"{avg_conf_all:.1%}" if avg_conf_all is not None else "N/A"
+            f.write(f"- **Avg Confidence (All)**: {avg_conf_all_str}\n")
             f.write("\n")
             
             # Signals by type
@@ -403,7 +415,8 @@ def write_results_to_file(
             if win_rate_by_type:
                 f.write("### Win Rate by Signal Type\n\n")
                 for signal_type, win_rate in win_rate_by_type.items():
-                    f.write(f"- **{signal_type}**: {win_rate:.1%}\n")
+                    win_rate_str = f"{win_rate:.1%}" if win_rate is not None else "N/A"
+                    f.write(f"- **{signal_type}**: {win_rate_str}\n")
                 f.write("\n")
             
             # Win rate by confidence bucket
@@ -411,7 +424,8 @@ def write_results_to_file(
             if win_rate_by_confidence:
                 f.write("### Win Rate by Confidence Bucket\n\n")
                 for bucket, win_rate in win_rate_by_confidence.items():
-                    f.write(f"- **{bucket}**: {win_rate:.1%}\n")
+                    win_rate_str = f"{win_rate:.1%}" if win_rate is not None else "N/A"
+                    f.write(f"- **{bucket}**: {win_rate_str}\n")
                 f.write("\n")
         
         # Data Summary
