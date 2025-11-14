@@ -62,6 +62,7 @@ class EODHDClient:
         end: str | None = None,
         interval: str = "30m",
         limit: int = 50000,
+        exchange: str = "US",
     ) -> List[IntervalData]:
         params: Dict[str, Any] = {
             "api_token": self._config.api_token,
@@ -74,7 +75,14 @@ class EODHDClient:
         if end is not None:
             params["to"] = _coerce_time_param(end)
 
-        path = f"intraday/{symbol}"
+        # EODHD API requires {SYMBOL}.{EXCHANGE} format for US stocks
+        # Add .US suffix if exchange is US and symbol doesn't already have it
+        if exchange == "US" and not symbol.endswith(".US"):
+            api_symbol = f"{symbol}.US"
+        else:
+            api_symbol = symbol
+
+        path = f"intraday/{api_symbol}"
         payload = self._request(path, params)
         if not isinstance(payload, list):
             raise EODHDParsingError("unexpected response format from intraday endpoint")
@@ -85,6 +93,7 @@ class EODHDClient:
         symbol: str,
         start: str | None = None,
         end: str | None = None,
+        exchange: str = "US",
     ) -> List[IntervalData]:
         params: Dict[str, Any] = {
             "api_token": self._config.api_token,
@@ -95,7 +104,14 @@ class EODHDClient:
         if end is not None:
             params["to"] = _coerce_date_param(end)
 
-        path = f"eod/{symbol}"
+        # EODHD API requires {SYMBOL}.{EXCHANGE} format for US stocks
+        # Add .US suffix if exchange is US and symbol doesn't already have it
+        if exchange == "US" and not symbol.endswith(".US"):
+            api_symbol = f"{symbol}.US"
+        else:
+            api_symbol = symbol
+
+        path = f"eod/{api_symbol}"
         payload = self._request(path, params)
         if not isinstance(payload, list):
             raise EODHDParsingError("unexpected response format from eod endpoint")
@@ -104,7 +120,8 @@ class EODHDClient:
     def fetch_live_ohlcv(
         self,
         symbol: str,
-        interval: str = "30m",
+        interval: str = "5m",
+        exchange: str = "US",
     ) -> List[IntervalData]:
         """
         Fetch live/realtime OHLCV data for today.
@@ -112,21 +129,36 @@ class EODHDClient:
         Uses EODHD's realtime endpoint for same-day data.
         This is faster and more up-to-date than historical intraday.
         
+        Note: EODHD API only supports 1m, 5m, and 1h intervals.
+        If 30m is requested, this will fetch 5m data (caller should aggregate).
+        
         Args:
             symbol: Stock symbol
-            interval: Data interval (1m, 5m, 15m, 30m, 1h)
+            interval: Data interval (1m, 5m, 1h) - default 5m
+            exchange: Exchange code (default: "US")
             
         Returns:
             List of IntervalData for today
         """
+        # EODHD API only supports 1m, 5m, 1h
+        # If 30m requested, use 5m (caller should aggregate)
+        if interval == "30m":
+            interval = "5m"
         params: Dict[str, Any] = {
             "api_token": self._config.api_token,
             "fmt": "json",
             "interval": interval,
         }
         
+        # EODHD API requires {SYMBOL}.{EXCHANGE} format for US stocks
+        # Add .US suffix if exchange is US and symbol doesn't already have it
+        if exchange == "US" and not symbol.endswith(".US"):
+            api_symbol = f"{symbol}.US"
+        else:
+            api_symbol = symbol
+        
         # Use realtime endpoint for live data
-        path = f"real-time/{symbol}"
+        path = f"real-time/{api_symbol}"
         payload = self._request(path, params)
         
         # Realtime endpoint may return single object or list
@@ -167,7 +199,14 @@ class EODHDClient:
                 continue
 
             if response.status_code == 200:
-                return response.json()
+                payload = response.json()
+                # Log empty responses for debugging
+                if isinstance(payload, list) and len(payload) == 0:
+                    LOGGER.warning(
+                        f"EODHD API returned empty array for {path} with params {params}. "
+                        f"URL was: {url}. Response text: {response.text[:200]}"
+                    )
+                return payload
 
             if response.status_code == 401:
                 raise EODHDAuthError("EODHD API authentication failed")
@@ -198,6 +237,11 @@ class EODHDClient:
                 backoff = min(backoff * 2, 60)
                 continue
 
+            # Log the full URL and response for debugging
+            LOGGER.error(
+                f"Unexpected EODHD response: {response.status_code} for {url} with params {params}. "
+                f"Response: {response.text[:500]}"
+            )
             raise EODHDRequestError(
                 f"Unexpected EODHD response: {response.status_code} - {response.text[:200]}"
             )

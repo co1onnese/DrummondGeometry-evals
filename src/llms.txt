@@ -2,9 +2,9 @@
 # LLM-Optimized Codebase Reference
 
 ## Project Overview
-Local-first market data ingestion and Drummond Geometry analysis toolkit implementing multi-timeframe coordination for trading signals. Production-ready system with prediction engine, real-time dashboard, CLI tools, and performance optimizations.
+Local-first market data ingestion and Drummond Geometry analysis toolkit implementing multi-timeframe coordination for trading signals. Production-ready system with prediction engine, real-time dashboard, CLI tools, continuous data collection, and performance optimizations.
 
-**Stack**: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI), streamlit (dashboard), apscheduler (scheduling)
+**Stack**: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI), streamlit (dashboard), apscheduler (scheduling), websockets (real-time data)
 
 ---
 
@@ -14,7 +14,7 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 - `get_version() -> str`: Return installed package version via importlib.metadata
 
 **dgas/__main__.py**
-- `build_parser() -> ArgumentParser`: CLI structure with subcommands (analyze, backtest, configure, data, predict, report, scheduler, status, monitor, data-report)
+- `build_parser() -> ArgumentParser`: CLI structure with subcommands (analyze, backtest, configure, data, data-collection, predict, report, scheduler, status, monitor, data-report)
 - `main(argv: list[str] | None) -> int`: Route to subcommands or --version
 - `_parse_key_value_pairs(items: list[str]) -> dict[str, str]`: Parse key=value strategy params
 
@@ -36,6 +36,7 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 - `NotificationConfig(BaseModel)`: discord, console
 - `MonitoringConfig(BaseModel)`: sla_p95_latency_ms, sla_error_rate_pct, sla_uptime_pct
 - `DashboardConfig(BaseModel)`: port, theme, auto_refresh_seconds
+- `DataCollectionConfig(BaseModel)`: enabled, interval_market_hours, interval_after_hours, interval_weekends, batch_size, max_concurrent_batches, delay_between_batches, requests_per_minute, rate_limit_buffer, use_websocket, websocket_interval, max_retries, retry_delay_seconds, error_threshold_pct, log_collection_stats, track_freshness, health_check_interval
 - `DGASConfig(BaseModel)`: Root config combining all sub-configs
 
 **dgas/config/loader.py**
@@ -50,7 +51,7 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 
 **dgas/config/adapter.py**
 - `UnifiedSettings(config_file: Path | None, config_overrides: dict[str, Any] | None)`: Bridge DGASConfig and legacy Settings
-  - Properties: database_url, database_pool_size, scheduler_symbols, prediction_min_confidence, notifications_*, monitoring_*, dashboard_*, eodhd_api_token, data_dir, eodhd_requests_per_minute
+  - Properties: database_url, database_pool_size, scheduler_symbols, prediction_min_confidence, notifications_*, monitoring_*, dashboard_*, data_collection, eodhd_api_token, data_dir, eodhd_requests_per_minute
   - `to_dict() -> dict[str, Any]`: Convert to dictionary
 - `load_settings(config_file: Path | None, **overrides: Any) -> UnifiedSettings`: Convenience function
 
@@ -150,23 +151,24 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
   - `invalidate(query: str, params: tuple) -> None`: Remove entry
   - `clear() -> int`: Clear all entries
   - `get_stats() -> dict[str, Any]`: Cache statistics
-- `CacheManager`: Manages multiple named caches
-- `get_cache_manager() -> CacheManager`: Global singleton
+- `QueryCacheManager`: Manages multiple named caches
+- `get_cache_manager() -> QueryCacheManager`: Global singleton
+- `cached_query(ttl: int, key_prefix: str)`: Decorator for query caching
 
 **dgas/db/performance_monitor.py**
 - `QueryMetrics`: Query performance metrics (query, execution_time_ms, row_count, success, error_message)
-- `PerformanceMonitor`: Tracks query performance
+- `QueryPerformanceMonitor`: Tracks query performance
   - `record_query(query: str, execution_time_ms: float, row_count: int, success: bool, error_message: str | None) -> None`
   - `get_summary(lookback_minutes: int) -> dict[str, Any]`: Aggregate statistics
   - `get_slow_queries(limit: int) -> List[QueryMetrics]`: Find slowest queries
-- `profile_query(monitor: PerformanceMonitor, query_name: str)`: Decorator for query profiling
-- `get_performance_monitor() -> PerformanceMonitor`: Global singleton
+- `profile_query(monitor: QueryPerformanceMonitor, query_name: str)`: Decorator for query profiling
+- `get_performance_monitor() -> QueryPerformanceMonitor`: Global singleton
 
 **dgas/db/optimizer.py**
 - `DatabaseOptimizer`: Database query optimization utilities
 - `get_optimizer() -> DatabaseOptimizer`: Global singleton
 
-**Migrations**: 001_initial_schema.sql, 002_enhanced_states_patterns.sql, 003_prediction_system.sql, 004_exchange_calendar.sql
+**Migrations**: 001_initial_schema.sql, 002_enhanced_states_patterns.sql, 003_prediction_system.sql, 004_exchange_calendar.sql, 005_data_collection_runs.sql
 
 ---
 
@@ -208,8 +210,8 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 
 **dgas/data/ingestion.py**
 - `IngestionSummary`: Symbol, interval, fetched, stored, quality, start, end
-- `backfill_intraday(symbol: str, *, exchange: str, start_date: str, end_date: str, interval: str, client: EODHDClient | None) -> IngestionSummary`
-- `incremental_update_intraday(symbol: str, *, exchange: str, interval: str, buffer_days: int, default_start: str | None, client: EODHDClient | None) -> IngestionSummary`
+- `backfill_intraday(symbol: str, *, exchange: str, start_date: str, end_date: str, interval: str, client: EODHDClient | None, use_live_for_today: bool = False) -> IngestionSummary`
+- `incremental_update_intraday(symbol: str, *, exchange: str, interval: str, buffer_days: int, default_start: str | None, client: EODHDClient | None, use_live_data: bool = False) -> IngestionSummary`
 - `backfill_many(symbols: Sequence[tuple[str, str]], *, start_date: str, end_date: str, interval: str, client: EODHDClient | None) -> List[IngestionSummary]`
 
 **dgas/data/exchange_calendar.py**
@@ -218,6 +220,58 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
   - `sync_exchange_calendar(exchange_code: str, force_refresh: bool) -> None`: Sync calendar to database
   - `is_trading_day(exchange_code: str, check_date: datetime) -> bool`: Check if date is trading day
   - `get_trading_hours(exchange_code: str, check_date: datetime) -> dict`: Get market open/close times
+
+**dgas/data/collection_service.py**
+- `CollectionResult`: Result of data collection cycle (symbols_requested, symbols_updated, symbols_failed, bars_fetched, bars_stored, execution_time_ms, errors, summaries, timestamp)
+- `DataCollectionService(config: DataCollectionConfig, client: EODHDClient | None)`: Service for continuous market data collection
+  - `collect_for_symbol(symbol: str, interval: str, exchange: str = "US") -> IngestionSummary`: Collect data for single symbol with retry logic
+  - `collect_batch(symbols: List[str], interval: str, exchange: str = "US") -> List[IngestionSummary]`: Collect data for batch of symbols with rate limiting
+  - `collect_all_symbols(symbols: List[str], interval: str, exchange: str = "US") -> CollectionResult`: Collect data for all symbols using batch processing
+  - `get_collection_status() -> Dict`: Get current collection service status
+  - `get_freshness_report(symbols: List[str], interval: str) -> Dict`: Get data freshness report for symbols
+  - `start_websocket_collection(symbols: List[str]) -> None`: Start WebSocket-based real-time data collection
+  - `stop_websocket_collection() -> None`: Stop WebSocket-based real-time data collection
+  - `store_websocket_bars(batch_size: int = 100) -> int`: Store buffered WebSocket bars to database
+  - `get_websocket_status() -> Optional[Dict]`: Get WebSocket collection status
+  - `close() -> None`: Close resources (client connection and WebSocket)
+
+**dgas/data/collection_scheduler.py**
+- `DataCollectionScheduler(config: DataCollectionConfig, symbols: List[str], service: DataCollectionService | None, market_hours: MarketHoursManager | None, settings: Settings | None)`: Scheduler for continuous data collection service
+  - `start() -> None`: Start data collection scheduler
+  - `stop(wait: bool = True) -> None`: Stop data collection scheduler
+  - `run_once() -> CollectionResult`: Execute single collection cycle manually
+  - `get_status() -> Dict`: Get scheduler status
+  - Runs 24/7 with dynamic intervals: market hours (5m), after hours (15m), weekends (30m)
+  - Manages WebSocket lifecycle based on market hours
+
+**dgas/data/websocket_client.py**
+- `WebSocketConnectionState`: State for a WebSocket connection (symbols, connection, connected, last_message_time, reconnect_attempts, messages_received, errors)
+- `EODHDWebSocketClient(api_token: str, on_bar_complete: Callable | None, on_tick: Callable | None, on_error: Callable | None, interval: str = "30m")`: WebSocket client for EODHD real-time market data
+  - `connect(symbols: List[str]) -> None`: Connect to EODHD WebSocket and subscribe to symbols (max 50 per connection, auto-creates multiple connections)
+  - `disconnect() -> None`: Disconnect all WebSocket connections
+  - `flush_pending_bars() -> List[IntervalData]`: Flush all pending bars that are complete
+  - `get_status() -> Dict[str, Any]`: Get connection status
+  - Handles tick-by-tick data, aggregates into interval bars via TickAggregator
+
+**dgas/data/websocket_manager.py**
+- `WebSocketManager(api_token: str, interval: str = "30m", on_bar_complete: Callable | None)`: Synchronous manager for async WebSocket client
+  - `start(symbols: List[str]) -> None`: Start WebSocket connections for symbols
+  - `stop(timeout: float = 10.0) -> None`: Stop WebSocket connections
+  - `get_bars(symbol: str | None = None) -> Dict[str, List]`: Get buffered bars for symbol(s)
+  - `flush_bars(symbol: str | None = None) -> Dict[str, List]`: Flush and return buffered bars for symbol(s)
+  - `store_buffered_bars(batch_size: int = 100) -> int`: Store buffered bars to database in batches
+  - `get_status() -> Dict`: Get WebSocket manager status
+  - `is_connected() -> bool`: Check if WebSocket is connected
+  - Runs WebSocket client in background thread with its own event loop
+
+**dgas/data/tick_aggregator.py**
+- `Tick`: A single price tick from WebSocket (symbol, timestamp, price, volume, trade_type)
+- `PendingBar`: A bar being built from ticks (symbol, interval, bar_start, bar_end, open, high, low, close, volume, tick_count)
+- `TickAggregator(interval: str = "30m")`: Aggregate ticks into interval bars
+  - `add_tick(tick: Tick) -> Optional[IntervalData]`: Add a tick and return completed bar if interval is finished
+  - `flush_pending_bars(before_time: datetime | None = None) -> List[IntervalData]`: Flush all pending bars that are complete
+  - `get_pending_bar(symbol: str) -> Optional[PendingBar]`: Get current pending bar for a symbol
+  - `get_stats() -> Dict[str, int]`: Get aggregation statistics
 
 ---
 
@@ -284,12 +338,15 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
   - `add_rule(rule: InvalidationRule) -> None`, `invalidate_by_pattern(pattern: str) -> int`, `register_data_update(symbol: str, timeframe: str) -> None`
 - `DataUpdateListener`: Listener for data updates
 - `get_invalidation_manager() -> CacheInvalidationManager`: Global singleton
+- `invalidate_calculation_cache(symbol: str, timeframe: str) -> None`: Invalidate cache for symbol/timeframe
+- `invalidate_all_caches() -> int`: Invalidate all caches
 
 **dgas/calculations/profiler.py**
 - `CalculationMetrics`: Calculation metrics (calculation_type, symbol, timeframe, execution_time_ms, success, timestamp, cache_hit)
 - `CalculationProfiler`: Profile Drummond geometry calculations
   - `record_calculation(...) -> None`, `get_summary() -> dict[str, Any]`, `get_slow_calculations(limit: int) -> List[CalculationMetrics]`
 - `get_calculation_profiler() -> CalculationProfiler`: Global singleton
+- `CachedCalculationEngine`: Cached calculation engine wrapper
 
 **dgas/calculations/optimized_coordinator.py**
 - `OptimizedTimeframeData`: TimeframeData with pre-computed indexes for fast lookups
@@ -305,6 +362,7 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 - `BenchmarkSuite`: Collection of benchmarks
 - `BenchmarkRunner`: Run benchmarks and collect results
 - `run_standard_benchmarks() -> Dict[str, Any]`: Run standard benchmark suite
+- `create_sample_data(symbol: str, timeframe: str, bars: int = 100) -> List[IntervalData]`: Create sample data for benchmarks
 
 ---
 
@@ -398,6 +456,8 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 **dgas/backtesting/indicator_loader.py**
 - `load_indicators_from_db(symbol: str, interval: str, timestamp: datetime, conn: Connection | None) -> dict[str, Any]`: Load pre-computed indicators from database
 - `load_indicators_batch(symbols: List[str], interval: str, timestamps: List[datetime], conn: Connection | None) -> Dict[str, Dict[datetime, dict]]`: Load indicators for multiple symbols/timestamps
+- `_load_confluence_zones_batch(...) -> Dict[str, List[ConfluenceZone]]`: Load confluence zones for multiple symbols
+- `_reconstruct_analysis(...) -> MultiTimeframeAnalysis`: Reconstruct multi-timeframe analysis from database
 
 **dgas/backtesting/strategies/base.py**
 - `StrategyConfig`: Pydantic base model for strategy configuration
@@ -529,6 +589,15 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 - `setup_data_parser(subparsers) -> ArgumentParser`: Set up data subcommand
 - Data management commands: backfill, update, report, quality
 
+**dgas/cli/data_collection_cli.py**
+- `setup_data_collection_parser(subparsers) -> ArgumentParser`: Set up data-collection subcommand
+- `_start_data_collection(args: Namespace) -> int`: Start data collection service daemon
+- `_stop_data_collection(args: Namespace) -> int`: Stop data collection service daemon
+- `_status_data_collection(args: Namespace) -> int`: Check data collection service status
+- `_run_once_data_collection(args: Namespace) -> int`: Trigger immediate data collection cycle
+- `_stats_data_collection(args: Namespace) -> int`: Show data collection statistics
+- Commands: start, stop, status, run-once, stats
+
 **dgas/cli/predict.py**
 - `setup_predict_parser(subparsers) -> ArgumentParser`: Set up predict subcommand
 - `run_predict_command(args: Namespace) -> int`: Generate trading signals with flexible output formats
@@ -593,6 +662,11 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 **dgas/dashboard/websocket_server.py**
 - `DashboardWebSocketServer`: WebSocket server for real-time updates
 - `start_server(host: str, port: int) -> DashboardWebSocketServer`: Start WebSocket server
+- `broadcast_prediction(prediction_data: Dict[str, Any]) -> None`: Broadcast prediction updates
+- `broadcast_signal(signal_data: Dict[str, Any]) -> None`: Broadcast signal updates
+- `broadcast_backtest(backtest_data: Dict[str, Any]) -> None`: Broadcast backtest updates
+- `broadcast_data_update(update_data: Dict[str, Any]) -> None`: Broadcast data updates
+- `broadcast_system_status(status_data: Dict[str, Any]) -> None`: Broadcast system status updates
 
 **dgas/dashboard/performance/optimizer.py**
 - `PerformanceMonitor`: Dashboard performance optimization
@@ -620,16 +694,17 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              CLI Entry Point                                │
 │  dgas/__main__.py                                                           │
-│      ├─ analyze      → cli/analyze.py → calculations/, data/                │
-│      ├─ backtest     → cli/backtest.py → backtesting/ (runner, engine)      │
-│      ├─ configure    → cli/configure.py → config/ (loader, schema)        │
-│      ├─ data         → cli/data.py → data/ (ingestion, repository)          │
-│      ├─ predict      → cli/predict.py → prediction/ (engine, scheduler)    │
-│      ├─ report       → cli/report.py → monitoring/, prediction/             │
-│      ├─ scheduler    → cli/scheduler_cli.py → prediction/scheduler.py       │
-│      ├─ status       → cli/status_cli.py → db/, prediction/                 │
-│      ├─ monitor      → cli/monitor.py → prediction/monitoring/              │
-│      └─ data-report  → monitoring/report.py                                 │
+│      ├─ analyze          → cli/analyze.py → calculations/, data/            │
+│      ├─ backtest         → cli/backtest.py → backtesting/ (runner, engine)  │
+│      ├─ configure        → cli/configure.py → config/ (loader, schema)      │
+│      ├─ data             → cli/data.py → data/ (ingestion, repository)     │
+│      ├─ data-collection  → cli/data_collection_cli.py → data/collection_*    │
+│      ├─ predict          → cli/predict.py → prediction/ (engine, scheduler) │
+│      ├─ report           → cli/report.py → monitoring/, prediction/         │
+│      ├─ scheduler        → cli/scheduler_cli.py → prediction/scheduler.py   │
+│      ├─ status           → cli/status_cli.py → db/, prediction/            │
+│      ├─ monitor          → cli/monitor.py → prediction/monitoring/           │
+│      └─ data-report      → monitoring/report.py                             │
 └──────────────────────┬────────────────────────────────────────────────────────┘
                        │
                        ↓
@@ -637,7 +712,7 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 │                        Configuration Layer                                   │
 │  config/loader.py → config/schema.py → config/adapter.py                    │
 │  settings.py (legacy)                                                        │
-│  core/config_manager.py (server resource config)                              │
+│  core/config_manager.py (server resource config)                            │
 └──────────────────────┬────────────────────────────────────────────────────────┘
                        │
         ┌───────────────┴──────────────┬──────────────────┬─────────────────────┐
@@ -649,9 +724,9 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 │  - enhanced_persistence.py                                              │   │ - quality,         │   │   Patterns/MTF    │   │   metrics,         │
 │  - query_cache.py                                                       │   │   ingestion       │   │ - cache/profiler  │   │   persistence/     │
 │  - performance_monitor.py                                               │   │ - exchange_calendar│   │ - optimized_*      │   │   reporting        │
-│  - persistence.py                                                      │   │                   │   │ - timeframe_builder│   │ - strategies/      │
-│  - migrations.py                                                        │   │                   │   │                   │   │   (base, registry) │
-│  - optimizer.py                                                        │   │                   │   │                   │   │ - portfolio_*      │
+│  - persistence.py                                                      │   │ - collection_*     │   │ - timeframe_builder│   │ - strategies/      │
+│  - migrations.py                                                        │   │ - websocket_*      │   │                   │   │   (base, registry) │
+│  - optimizer.py                                                        │   │ - tick_aggregator  │   │                   │   │ - portfolio_*      │
 │                                                                          │   │                   │   │                   │   │ - signal_*         │
 │                                                                          │   │                   │   │                   │   │ - execution/       │
 └──────┬────────┘   └─────────┬──────────┘   └────────┬───────┘   └────────┬──────────┘
@@ -660,7 +735,8 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 PostgreSQL ← bulk_upsert_market_data()   Indicator outputs → strategies   persist_backtest()
 Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis, 
         prediction_runs, generated_signals, prediction_metrics, scheduler_state,
-        backtest_results, backtest_trades, exchanges, market_holidays, trading_days
+        backtest_results, backtest_trades, exchanges, market_holidays, trading_days,
+        data_collection_runs
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                        Prediction System                                     │
@@ -708,8 +784,11 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 ## Data Flow Summary
 
 1. **Configuration**: `config/loader.py` loads YAML/JSON → `config/adapter.py` merges with env vars → `UnifiedSettings` provides unified interface
-2. **CLI Routing**: `__main__.py` dispatches to subcommands (analyze, backtest, configure, data, predict, report, scheduler, status, monitor)
-3. **Ingestion**: `data/` modules fetch EODHD data, validate quality, persist via `bulk_upsert_market_data()`
+2. **CLI Routing**: `__main__.py` dispatches to subcommands (analyze, backtest, configure, data, data-collection, predict, report, scheduler, status, monitor)
+3. **Ingestion**: 
+   - REST API: `data/` modules fetch EODHD data, validate quality, persist via `bulk_upsert_market_data()`
+   - WebSocket: `data/websocket_client.py` receives real-time ticks → `data/tick_aggregator.py` aggregates into bars → `data/websocket_manager.py` buffers and stores
+   - Continuous: `data/collection_service.py` manages batch collection → `data/collection_scheduler.py` orchestrates 24/7 collection with dynamic intervals
 4. **Calculations**: `calculations/` modules produce PLdot, envelopes, states, patterns, multi-timeframe alignment (with caching and profiling)
 5. **Backtesting**: 
    - Single-symbol: `backtesting/runner.py` loads historical bars, runs strategies through `engine.py`, computes metrics, optionally persists
@@ -740,9 +819,10 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 - Shared quality analysis (analyze_intervals, summarize_reports)
 - Factory methods for data models (IntervalData.from_api_record, IntervalData.from_api_list)
 - Calculation caching (CalculationCache, CacheInvalidationManager)
-- Query result caching (QueryCache, CacheManager)
+- Query result caching (QueryCache, QueryCacheManager)
 - Connection pooling (PooledConnectionManager, DatabaseConnectionPool)
 - Shared trade execution logic (BaseTradeExecutor) eliminates duplication between SimulationEngine and PortfolioPositionManager
+- WebSocket abstraction (WebSocketManager) bridges async client with sync service
 
 ### Naming
 - snake_case for functions, variables, modules
@@ -751,7 +831,7 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 - Descriptive names: bulk_upsert_market_data, not save_data; MultiTimeframeCoordinator, not MTF
 
 ### Dependencies
-- Production: numpy, pandas, pydantic, pydantic-settings, python-dotenv, requests, sqlalchemy, psycopg[binary], structlog, rich, apscheduler, pyyaml, psutil
+- Production: numpy, pandas, pydantic, pydantic-settings, python-dotenv, requests, sqlalchemy, psycopg[binary], structlog, rich, apscheduler, pyyaml, psutil, websockets
 - Dashboard: streamlit, plotly
 - Dev: pytest, ruff (linter/formatter), mypy (type checker)
 - Line length: 100 chars (ruff config)
@@ -766,7 +846,7 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 ## Database Schema Notes
 
 ### Core Tables
-- **market_symbols**: symbol (unique), exchange, metadata (sector, industry, market_cap)
+- **market_symbols**: symbol (unique), exchange, metadata (sector, industry, market_cap), is_active
 - **market_data**: OHLCV bars with interval_type, unique on (symbol_id, timestamp, interval_type)
 - **market_states_v2**: Enhanced state classification with confidence, trend direction, PLdot slope, bars_in_state
 - **pattern_events**: Detected patterns (PLDOT_PUSH, EXHAUST, C_WAVE, etc.) with direction, strength, timestamps
@@ -781,6 +861,7 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 - **trading_days**: Pre-computed trading calendar with actual_close times for half-days
 - **backtest_results**: Strategy metrics (Sharpe, max drawdown, win rate, etc.)
 - **backtest_trades**: Individual trades per backtest with P&L
+- **data_collection_runs**: Data collection cycle metadata (run_timestamp, interval_type, symbols_requested, symbols_updated, symbols_failed, bars_fetched, bars_stored, execution_time_ms, status, error_count)
 
 ### Indexing Strategy
 - DESC indexes on (symbol_id, timestamp) for recent data queries
@@ -796,22 +877,25 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 1. **Clear separation of concerns**: data/, calculations/, db/, cli/, prediction/, dashboard/, backtesting/ are well-defined boundaries
 2. **Type safety**: Comprehensive type hints and Pydantic validation catch errors early
 3. **Immutable data structures**: Frozen dataclasses prevent accidental mutations
-4. **DRY principle**: Reusable repository functions, shared quality checks, factory methods, unified configuration, shared trade execution logic
+4. **DRY principle**: Reusable repository functions, shared quality checks, factory methods, unified configuration, shared trade execution logic, WebSocket abstraction
 5. **Multi-timeframe first**: Core Drummond principle is properly implemented with HTF trend filtering
 6. **Performance optimizations**: Connection pooling, query caching, calculation caching, profiling built-in, parallel processing support
 7. **Portfolio-level backtesting**: Sophisticated multi-symbol backtesting with shared capital, signal ranking, position management
 8. **Signal evaluation**: Built-in signal accuracy tracking and evaluation
 9. **Unified configuration**: Seamless bridge between new config files and legacy environment variables
-10. **Real-time capabilities**: WebSocket support for live dashboard updates
+10. **Real-time capabilities**: WebSocket support for live dashboard updates and real-time data collection
 11. **Comprehensive monitoring**: Performance tracking, calibration, SLA compliance built-in
+12. **Continuous data collection**: 24/7 data collection service with dynamic intervals, WebSocket integration, automatic retry logic
+13. **Tick aggregation**: Real-time tick-to-bar aggregation for WebSocket data streams
 
 ### Areas for Improvement
 1. **Error handling**: Some areas could benefit from more specific exception types (e.g., CalculationError, PersistenceError)
 2. **Logging**: Consider structured logging (structlog is in dependencies but not extensively used)
 3. **Testing**: Some calculation modules could use more edge case coverage
-4. **Documentation**: Inline docstrings are good, but some complex algorithms (multi-timeframe coordination, portfolio backtesting) could use more explanation
+4. **Documentation**: Inline docstrings are good, but some complex algorithms (multi-timeframe coordination, portfolio backtesting, tick aggregation) could use more explanation
 5. **Async support**: Consider async/await for I/O-bound operations (database, API calls) in future versions
 6. **Distributed caching**: Current caching is in-memory; consider Redis for multi-process deployments
+7. **WebSocket resilience**: Consider circuit breaker pattern for WebSocket reconnection logic
 
 ### Code Quality
 - **Readability**: High - clear function names, good type hints, logical structure
@@ -830,10 +914,11 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 - **Strategy pattern**: EnvelopeCalculator methods, NotificationAdapter implementations, BaseStrategy for backtesting
 - **Context manager pattern**: get_connection, get_db_connection, _client_context, DrummondPersistence
 - **Repository pattern**: data/repository.py for data access abstraction
-- **Adapter pattern**: UnifiedSettings bridges new config system and legacy Settings
+- **Adapter pattern**: UnifiedSettings bridges new config system and legacy Settings, WebSocketManager bridges async client with sync service
 - **Singleton pattern**: Global instances for cache managers, profilers, connection pools
 - **Observer pattern**: DataUpdateListener for cache invalidation on data updates
 - **Template method pattern**: BaseTradeExecutor provides shared execution logic, BaseStrategy for strategy framework
+- **Builder pattern**: TickAggregator builds bars from ticks incrementally
 
 ### Performance Architecture
 - **Connection pooling**: Reduces connection overhead, especially important for prediction cycles processing multiple symbols
@@ -844,6 +929,7 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 - **Parallel processing**: Support for parallel batch processing in core/parallel_processor.py
 - **Memory management**: Memory monitoring and GC optimization in core/io_optimizer.py
 - **Target achieved**: <200ms per symbol/timeframe bundle through comprehensive optimization
+- **WebSocket efficiency**: Tick aggregation reduces storage overhead, buffering enables batch writes
 
 ### Portfolio Backtesting Architecture
 - **Shared capital pool**: PortfolioPositionManager manages multiple positions sharing capital
@@ -853,6 +939,15 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 - **On-the-fly indicators**: PortfolioIndicatorCalculator calculates indicators during backtest without pre-computation
 - **HTF caching**: Pre-loads higher timeframe data for all symbols to avoid repeated queries
 - **Signal evaluation**: SignalEvaluator tracks predicted signals vs actual trade outcomes
+
+### Data Collection Architecture
+- **Dual-mode collection**: REST API for historical gaps, WebSocket for real-time during market hours
+- **Dynamic intervals**: Market hours (5m), after hours (15m), weekends (30m) for efficient resource usage
+- **Batch processing**: Configurable batch sizes with rate limiting and retry logic
+- **Tick aggregation**: Real-time ticks aggregated into interval bars via TickAggregator
+- **Automatic retry**: Exponential backoff with jitter for failed collections
+- **WebSocket resilience**: Multiple connections (50 symbols each), automatic reconnection with exponential backoff
+- **State management**: Tracks collection runs in database for monitoring and recovery
 
 ---
 

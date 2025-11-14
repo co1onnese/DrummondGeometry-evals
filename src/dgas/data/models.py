@@ -70,6 +70,8 @@ class IntervalData(BaseModel):
     @field_validator("volume", mode="before")
     @classmethod
     def _to_int(cls, value: Any) -> int:  # noqa: D417
+        if value is None:
+            return 0
         return int(value)
 
     @classmethod
@@ -139,15 +141,29 @@ class IntervalData(BaseModel):
 
         timestamp_raw = record.get("timestamp") or record.get("datetime") or record.get("date")
 
+        # Extract OHLC values
+        open_val = record.get("open")
+        high_val = record.get("high")
+        low_val = record.get("low")
+        close_val = record.get("close")
+        
+        # Validate that all required OHLC values are present
+        # Some API records may have None values (e.g., incomplete bars, errors)
+        if open_val is None or high_val is None or low_val is None or close_val is None:
+            raise ValueError(
+                f"API record missing required OHLC data for {symbol}: "
+                f"open={open_val}, high={high_val}, low={low_val}, close={close_val}"
+            )
+
         data = {
             "symbol": symbol,
             "exchange": "US",  # Always use "US" as unified exchange code for EODHD
             "timestamp": cls._parse_timestamp_to_utc(timestamp_raw),
             "interval": interval,
-            "open": record.get("open"),
-            "high": record.get("high"),
-            "low": record.get("low"),
-            "close": record.get("close"),
+            "open": open_val,
+            "high": high_val,
+            "low": low_val,
+            "close": close_val,
             "adjusted_close": record.get("adjusted_close"),
             "volume": record.get("volume", 0),
         }
@@ -160,7 +176,24 @@ class IntervalData(BaseModel):
         interval: str,
         symbol_override: str | None = None,
     ) -> List["IntervalData"]:
-        return [cls.from_api_record(rec, interval, symbol_override=symbol_override) for rec in records]
+        """Parse list of API records, skipping records with invalid data."""
+        result = []
+        skipped = 0
+        for rec in records:
+            try:
+                result.append(cls.from_api_record(rec, interval, symbol_override=symbol_override))
+            except ValueError as e:
+                # Skip records with missing/invalid OHLC data
+                skipped += 1
+                # Log at debug level to avoid spam, but track skipped records
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug(f"Skipping invalid API record: {e}")
+        if skipped > 0:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Skipped {skipped} records with invalid OHLC data out of {len(list(records))} total")
+        return result
 
 
 __all__ = ["IntervalData"]

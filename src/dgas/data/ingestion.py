@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable, List, Sequence
 
 from ..db import get_connection
+from .bar_aggregator import aggregate_bars
 from .client import EODHDClient, EODHDConfig
 from .quality import DataQualityReport, analyze_intervals
 from .repository import bulk_upsert_market_data, ensure_market_symbol, get_latest_timestamp
@@ -75,21 +76,51 @@ def backfill_intraday(
     all_bars: List[IntervalData] = []
     
     with _client_context(client) as api:
-        # Fetch historical data (up to yesterday)
-        historical_end = min(end_dt, today - timedelta(days=1))
+        # Fetch historical data
+        # If end_date is in the future, only fetch up to today
+        # If end_date is today or in the past, use the requested end_date
+        # (Don't cap to yesterday - let the user request specific dates)
+        if end_dt > today:
+            # End date is in future - only fetch up to today
+            historical_end = today
+        else:
+            # Use the requested end_date (could be today or in the past)
+            historical_end = end_dt
         
         if start_dt <= historical_end:
-            bars = api.fetch_intraday(symbol, start=start_date, end=historical_end.isoformat(), interval=interval)
+            # EODHD API only supports 1m, 5m, and 1h intervals
+            # If requesting 30m, fetch 5m and aggregate to 30m
+            if interval == "30m":
+                LOGGER.info(f"{symbol}: 30m not supported by API, fetching 5m and aggregating")
+                bars_5m = api.fetch_intraday(symbol, start=start_date, end=historical_end.isoformat(), interval="5m", exchange=exchange)
+                if bars_5m:
+                    LOGGER.info(f"{symbol}: Fetched {len(bars_5m)} 5m bars, aggregating to 30m")
+                    bars = aggregate_bars(bars_5m, "30m")
+                    LOGGER.info(f"{symbol}: Aggregated to {len(bars)} 30m bars")
+                else:
+                    bars = []
+            else:
+                # For valid intervals (1m, 5m, 1h), fetch directly
+                bars = api.fetch_intraday(symbol, start=start_date, end=historical_end.isoformat(), interval=interval, exchange=exchange)
+            
             all_bars.extend(bars)
             LOGGER.debug(f"{symbol}: Fetched {len(bars)} historical bars from {start_date} to {historical_end}")
         
         # Fetch today's data using live endpoint if end_date includes today
         if end_dt >= today and use_live_for_today:
             try:
-                live_bars = api.fetch_live_ohlcv(symbol, interval=interval)
+                # Live endpoint: use 5m if requesting 30m (API only supports 1m, 5m, 1h)
+                live_interval = "5m" if interval == "30m" else interval
+                live_bars = api.fetch_live_ohlcv(symbol, interval=live_interval, exchange=exchange)
                 if live_bars:
                     # Filter to only today's bars
                     today_bars = [b for b in live_bars if b.timestamp.date() == today]
+                    
+                    # If we fetched 5m but need 30m, aggregate
+                    if interval == "30m" and today_bars:
+                        today_bars = aggregate_bars(today_bars, "30m")
+                        LOGGER.debug(f"{symbol}: Aggregated {len(live_bars)} live 5m bars to {len(today_bars)} 30m bars")
+                    
                     all_bars.extend(today_bars)
                     LOGGER.debug(f"{symbol}: Fetched {len(today_bars)} live bars for today")
             except Exception as e:
@@ -97,7 +128,7 @@ def backfill_intraday(
                 # Fall back: try historical for today if live fails
                 if end_dt >= today:
                     try:
-                        today_bars = api.fetch_intraday(symbol, start=today.isoformat(), end=today.isoformat(), interval=interval)
+                        today_bars = api.fetch_intraday(symbol, start=today.isoformat(), end=today.isoformat(), interval=interval, exchange=exchange)
                         all_bars.extend(today_bars)
                         LOGGER.debug(f"{symbol}: Fetched {len(today_bars)} historical bars for today (fallback)")
                     except Exception as e2:
@@ -144,7 +175,7 @@ def backfill_eod(
     """Fetch and persist historical end-of-day (daily) data for a symbol."""
 
     with _client_context(client) as api:
-        bars = api.fetch_eod(symbol, start=start_date, end=end_date)
+        bars = api.fetch_eod(symbol, start=start_date, end=end_date, exchange=exchange)
 
     quality = analyze_intervals(bars)
 
@@ -213,9 +244,22 @@ def incremental_update_intraday(
     # Determine what data we need
     # Use live data for recent dates (today or yesterday) - live endpoint has most recent available
     # Use historical for older dates
-    # Fix: Use <= to include yesterday (if latest is yesterday, we still need today's data)
-    need_recent_data = latest_ts is None or latest_ts.date() <= yesterday
-    need_historical_data = latest_ts is None or latest_ts.date() < (today - timedelta(days=buffer_days))
+    # Fix: Always fetch recent data if latest is before today (even if it's from yesterday)
+    # Also fetch if latest is from today but more than 1 hour old (stale intraday data)
+    if latest_ts is None:
+        need_recent_data = True
+        need_historical_data = True
+    else:
+        latest_date = latest_ts.date()
+        hours_since_latest = (now - latest_ts).total_seconds() / 3600.0
+        
+        # Need recent data if:
+        # 1. Latest data is from yesterday or earlier
+        # 2. Latest data is from today but more than 1 hour old (stale)
+        need_recent_data = latest_date < today or (latest_date == today and hours_since_latest > 1.0)
+        
+        # Need historical data if latest is more than buffer_days old
+        need_historical_data = latest_date < (today - timedelta(days=buffer_days))
     
     all_bars: List[IntervalData] = []
     total_fetched = 0
@@ -227,7 +271,7 @@ def incremental_update_intraday(
         if need_recent_data and use_live_data:
             try:
                 LOGGER.debug(f"{symbol}: Fetching live/realtime data")
-                live_bars = api.fetch_live_ohlcv(symbol, interval=interval)
+                live_bars = api.fetch_live_ohlcv(symbol, interval=interval, exchange=exchange)
                 if live_bars:
                     # Filter to recent bars (today or yesterday) - live endpoint has latest available
                     recent_bars = [b for b in live_bars if b.timestamp.date() >= yesterday]
@@ -262,6 +306,7 @@ def incremental_update_intraday(
                         start=start_date,
                         end=end_date,
                         interval=interval,
+                        exchange=exchange,
                     )
                     all_bars.extend(historical_bars)
                     total_fetched += len(historical_bars)

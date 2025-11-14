@@ -83,6 +83,7 @@ class DataCollectionScheduler:
         self._last_run_time: Optional[datetime] = None
         self._websocket_started = False
         self._last_websocket_store_time: Optional[datetime] = None
+        self._start_time: Optional[datetime] = None  # Track when scheduler started for stuck detection
 
         # Setup signal handlers
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -236,8 +237,65 @@ class DataCollectionScheduler:
 
         # Acquire lock to prevent concurrent executions
         if not self._execution_lock.acquire(blocking=False):
-            logger.warning("Collection cycle already running, skipping this interval")
-            return
+            # Check if lock has been held too long (stuck cycle detection)
+            # If last run was more than 2 hours ago, or if we've never run and it's been >30 min since start, force release
+            should_force_release = False
+            if self._last_run_time:
+                time_since_last_run = (datetime.now(timezone.utc) - self._last_run_time).total_seconds()
+                max_stuck_duration = 2 * 60 * 60  # 2 hours
+                if time_since_last_run > max_stuck_duration:
+                    should_force_release = True
+                    logger.warning(
+                        f"Collection cycle appears stuck (last run {time_since_last_run/3600:.1f}h ago). "
+                        f"Force releasing lock."
+                    )
+            else:
+                # No last run time - check if service has been running for >30 minutes without completing
+                # This handles the case where initial cycle hangs on startup
+                if hasattr(self, '_start_time'):
+                    time_since_start = (datetime.now(timezone.utc) - self._start_time).total_seconds()
+                    if time_since_start > 30 * 60:  # 30 minutes
+                        should_force_release = True
+                        logger.warning(
+                            f"Collection cycle appears stuck (no runs in {time_since_start/60:.1f} min since start). "
+                            f"Force releasing lock."
+                        )
+                else:
+                    # First time we see this - check if it's been too long
+                    # If service started more than 30 minutes ago and no runs, force release
+                    if hasattr(self, '_start_time') and self._start_time:
+                        time_since_start = (datetime.now(timezone.utc) - self._start_time).total_seconds()
+                        if time_since_start > 30 * 60:  # 30 minutes
+                            should_force_release = True
+                            logger.warning(
+                                f"Collection cycle appears stuck (no runs in {time_since_start/60:.1f} min since start). "
+                                f"Force releasing lock."
+                            )
+                        else:
+                            logger.warning("Collection cycle already running, skipping this interval (first check)")
+                            return
+                    else:
+                        # Set start time and wait
+                        self._start_time = datetime.now(timezone.utc)
+                        logger.warning("Collection cycle already running, skipping this interval (first check)")
+                        return
+            
+            if should_force_release:
+                try:
+                    if self._execution_lock.locked():
+                        self._execution_lock.release()
+                    # Try to acquire again
+                    if self._execution_lock.acquire(blocking=False):
+                        logger.info("Successfully recovered from stuck cycle")
+                    else:
+                        logger.error("Failed to acquire lock after force release")
+                        return
+                except Exception as e:
+                    logger.error(f"Error force-releasing stuck lock: {e}", exc_info=True)
+                    return
+            else:
+                logger.warning("Collection cycle already running, skipping this interval")
+                return
 
         # Add timeout protection: if cycle takes too long, release lock
         cycle_start_time = time.time()
@@ -253,17 +311,40 @@ class DataCollectionScheduler:
             )
 
             # Execute REST collection (for historical data or when WebSocket not available)
-            # Add timeout check before starting
-            elapsed = time.time() - cycle_start_time
-            if elapsed > max_cycle_duration:
-                logger.error(f"Cycle timeout check failed before start: {elapsed:.1f}s elapsed")
-                raise TimeoutError(f"Cycle timeout: {elapsed:.1f}s > {max_cycle_duration}s")
+            # Use threading to add timeout protection during execution
+            import threading
+            result_container = {"result": None, "exception": None}
             
-            result = self.service.collect_all_symbols(
-                self.symbols,
-                interval=interval,
-                exchange="US",
-            )
+            def collect_with_timeout():
+                try:
+                    result_container["result"] = self.service.collect_all_symbols(
+                        self.symbols,
+                        interval=interval,
+                        exchange="US",
+                    )
+                except Exception as e:
+                    result_container["exception"] = e
+            
+            collection_thread = threading.Thread(target=collect_with_timeout, daemon=True)
+            collection_thread.start()
+            collection_thread.join(timeout=max_cycle_duration)
+            
+            if collection_thread.is_alive():
+                # Thread is still running - timeout occurred
+                logger.error(
+                    f"Collection cycle timed out after {max_cycle_duration/60:.1f} minutes. "
+                    f"Force releasing lock."
+                )
+                raise TimeoutError(
+                    f"Collection cycle exceeded maximum duration of {max_cycle_duration/60:.1f} minutes"
+                )
+            
+            if result_container["exception"]:
+                raise result_container["exception"]
+            
+            result = result_container["result"]
+            if result is None:
+                raise RuntimeError("Collection cycle returned None result")
             
             # Check if cycle took too long
             cycle_duration = time.time() - cycle_start_time
@@ -375,6 +456,9 @@ class DataCollectionScheduler:
 
         logger.info("Starting data collection scheduler")
 
+        # Track start time for stuck cycle detection
+        self._start_time = datetime.now(timezone.utc)
+
         # Add scheduled job
         self._add_scheduled_job()
 
@@ -405,8 +489,18 @@ class DataCollectionScheduler:
                 self._websocket_started = False
 
         # Run initial REST collection cycle (for historical data or if WebSocket failed)
+        # Run in background thread to avoid blocking startup if cycle hangs
         if not self._websocket_started:
-            self._execute_collection_cycle()
+            import threading
+            def run_initial_cycle():
+                try:
+                    self._execute_collection_cycle()
+                except Exception as e:
+                    logger.error(f"Initial collection cycle failed: {e}", exc_info=True)
+            
+            initial_thread = threading.Thread(target=run_initial_cycle, daemon=True)
+            initial_thread.start()
+            logger.info("Initial collection cycle started in background thread")
 
         logger.info("Data collection scheduler started")
 
