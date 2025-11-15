@@ -135,10 +135,11 @@ class DataCollectionScheduler:
 
     def _add_scheduled_job(self) -> None:
         """Add scheduled job to APScheduler with dynamic interval."""
-        # Use a frequent trigger (every 2 minutes) and check market hours inside
-        # This allows dynamic interval switching while reducing overlap risk
+        # Use a trigger that matches typical cycle duration (every 10 minutes)
+        # This prevents skipped runs while still allowing dynamic interval switching
         # The _should_run_cycle() method enforces the actual collection interval
-        trigger = CronTrigger(minute="*/2", timezone="America/New_York")
+        # Note: Cycles take ~6-7 minutes, so 10-minute trigger prevents overlap
+        trigger = CronTrigger(minute="*/10", timezone="America/New_York")
         
         self.scheduler.add_job(
             func=self._execute_collection_cycle,
@@ -236,7 +237,18 @@ class DataCollectionScheduler:
             return
 
         # Acquire lock to prevent concurrent executions
-        if not self._execution_lock.acquire(blocking=False):
+        logger.info("Attempting to acquire execution lock...")
+        lock_acquired = False
+        try:
+            lock_acquired = self._execution_lock.acquire(blocking=False)
+            if lock_acquired:
+                logger.info("Execution lock acquired successfully")
+            else:
+                logger.warning("Execution lock already held, checking if cycle is stuck...")
+        except Exception as e:
+            logger.error(f"Error acquiring lock: {e}", exc_info=True)
+        
+        if not lock_acquired:
             # Check if lock has been held too long (stuck cycle detection)
             # If last run was more than 2 hours ago, or if we've never run and it's been >30 min since start, force release
             should_force_release = False
@@ -299,7 +311,7 @@ class DataCollectionScheduler:
 
         # Add timeout protection: if cycle takes too long, release lock
         cycle_start_time = time.time()
-        max_cycle_duration = 60 * 60  # 1 hour maximum (safety timeout)
+        max_cycle_duration = 10 * 60  # 10 minutes maximum timeout
         
         try:
             interval = self._get_collection_interval()
@@ -309,6 +321,7 @@ class DataCollectionScheduler:
                 f"Starting REST data collection cycle: {len(self.symbols)} symbols, "
                 f"interval={interval}, {market_status}"
             )
+            logger.info(f"Cycle timeout set to {max_cycle_duration/60:.1f} minutes")
 
             # Execute REST collection (for historical data or when WebSocket not available)
             # Use threading to add timeout protection during execution
@@ -317,23 +330,36 @@ class DataCollectionScheduler:
             
             def collect_with_timeout():
                 try:
+                    logger.info("Collection thread started, calling collect_all_symbols...")
                     result_container["result"] = self.service.collect_all_symbols(
                         self.symbols,
                         interval=interval,
                         exchange="US",
                     )
+                    logger.info("Collection thread completed successfully")
                 except Exception as e:
+                    logger.error(f"Collection thread raised exception: {e}", exc_info=True)
                     result_container["exception"] = e
             
+            logger.info("Starting collection thread with timeout protection...")
             collection_thread = threading.Thread(target=collect_with_timeout, daemon=True)
             collection_thread.start()
-            collection_thread.join(timeout=max_cycle_duration)
+            logger.info(f"Collection thread started, waiting up to {max_cycle_duration/60:.1f} minutes...")
+            
+            # Wait with periodic status updates
+            elapsed = 0
+            check_interval = 30  # Check every 30 seconds
+            while collection_thread.is_alive() and elapsed < max_cycle_duration:
+                collection_thread.join(timeout=check_interval)
+                elapsed += check_interval
+                if collection_thread.is_alive():
+                    logger.info(f"Collection cycle in progress: {elapsed/60:.1f} minutes elapsed, {len(self.symbols)} symbols")
             
             if collection_thread.is_alive():
                 # Thread is still running - timeout occurred
                 logger.error(
                     f"Collection cycle timed out after {max_cycle_duration/60:.1f} minutes. "
-                    f"Force releasing lock."
+                    f"Force releasing lock. Thread is still alive."
                 )
                 raise TimeoutError(
                     f"Collection cycle exceeded maximum duration of {max_cycle_duration/60:.1f} minutes"
@@ -414,17 +440,54 @@ class DataCollectionScheduler:
                     f"(threshold: {self.config.error_threshold_pct}%)"
                 )
 
+        except TimeoutError as e:
+            logger.error(f"Collection cycle timed out: {e}", exc_info=True)
+            # Force release lock on timeout
+            try:
+                if self._execution_lock.locked():
+                    self._execution_lock.release()
+                    logger.info("Lock released after timeout")
+                else:
+                    logger.warning("Lock was not held when timeout occurred")
+            except Exception as release_error:
+                logger.error(f"Failed to release lock after timeout: {release_error}", exc_info=True)
         except Exception as e:
             logger.error(f"Error in collection cycle: {e}", exc_info=True)
             # Ensure lock is released even on error
         finally:
             # Always release lock, even if cycle failed or timed out
+            logger.info("Entering finally block to release lock...")
+            print("🔓 Entering finally block to release lock", flush=True)
             try:
-                if self._execution_lock.locked():
-                    self._execution_lock.release()
-                    logger.debug("Lock released after cycle completion/error")
+                if lock_acquired:
+                    logger.info(f"Lock was acquired, checking if still locked...")
+                    is_locked = self._execution_lock.locked()
+                    logger.info(f"Lock state: locked={is_locked}")
+                    if is_locked:
+                        self._execution_lock.release()
+                        logger.info("✓ Lock released in finally block after cycle completion/error")
+                        print("✓ Lock released successfully", flush=True)
+                    else:
+                        logger.warning("Lock was not held in finally block (may have been released earlier)")
+                        print("⚠ Lock was not held (already released?)", flush=True)
+                else:
+                    logger.debug("Lock was not acquired, nothing to release")
+                    print("⚠ Lock was not acquired, nothing to release", flush=True)
             except Exception as release_error:
-                logger.error(f"Failed to release execution lock: {release_error}", exc_info=True)
+                logger.error(f"Failed to release execution lock in finally block: {release_error}", exc_info=True)
+                print(f"❌ Failed to release lock: {release_error}", flush=True)
+                # Try one more time with force
+                try:
+                    # Force release if possible
+                    import threading
+                    if hasattr(self._execution_lock, '_is_owned'):
+                        if self._execution_lock._is_owned():
+                            self._execution_lock.release()
+                            logger.info("Lock force-released after exception")
+                            print("✓ Lock force-released", flush=True)
+                except Exception as force_error:
+                    logger.error(f"Force release also failed: {force_error}")
+                    print(f"❌ Force release failed: {force_error}", flush=True)
 
     def _store_websocket_bars(self) -> None:
         """
@@ -466,17 +529,13 @@ class DataCollectionScheduler:
         self.scheduler.start()
         self._is_running = True
 
-        # Start WebSocket if market is open
+        # Start WebSocket if market is open (non-blocking, no wait)
         if self.market_hours.is_market_open():
             try:
                 logger.info("Market is open - starting WebSocket collection on startup")
                 self.service.start_websocket_collection(self.symbols)
                 
-                # Wait a moment for connection to establish
-                import time
-                time.sleep(3)
-                
-                # Verify connection
+                # Check connection immediately (no wait)
                 ws_status = self.service.get_websocket_status()
                 if ws_status and ws_status.get("client_connected", False):
                     self._websocket_started = True
@@ -488,19 +547,33 @@ class DataCollectionScheduler:
                 logger.warning(f"Failed to start WebSocket on startup: {e}, will use REST API", exc_info=True)
                 self._websocket_started = False
 
-        # Run initial REST collection cycle (for historical data or if WebSocket failed)
-        # Run in background thread to avoid blocking startup if cycle hangs
+        # Run initial REST collection cycle immediately (for historical data or if WebSocket failed)
+        # Start immediately in background thread (non-blocking) but with no delay
         if not self._websocket_started:
+            logger.info("Starting immediate initial collection cycle on startup (no delay)")
+            print("🚀 Starting immediate initial collection cycle on startup (no delay)", flush=True)
             import threading
             def run_initial_cycle():
                 try:
+                    logger.info("Initial collection cycle executing now...")
+                    print("⚡ Initial collection cycle executing now...", flush=True)
+                    cycle_start = time.time()
                     self._execute_collection_cycle()
+                    cycle_duration = time.time() - cycle_start
+                    logger.info(f"Initial collection cycle completed on startup in {cycle_duration/60:.1f} minutes")
+                    print(f"✅ Initial collection cycle completed on startup in {cycle_duration/60:.1f} minutes", flush=True)
+                except TimeoutError as e:
+                    logger.error(f"Initial collection cycle timed out: {e}", exc_info=True)
+                    print(f"⏱️ Initial collection cycle timed out: {e}", flush=True)
                 except Exception as e:
-                    logger.error(f"Initial collection cycle failed: {e}", exc_info=True)
+                    logger.error(f"Initial collection cycle failed on startup: {e}", exc_info=True)
+                    print(f"❌ Initial collection cycle failed on startup: {e}", flush=True)
             
+            # Start immediately with no delay
             initial_thread = threading.Thread(target=run_initial_cycle, daemon=True)
             initial_thread.start()
-            logger.info("Initial collection cycle started in background thread")
+            logger.info("Initial collection cycle thread started immediately")
+            print("✅ Initial collection cycle thread started immediately", flush=True)
 
         logger.info("Data collection scheduler started")
 

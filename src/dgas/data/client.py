@@ -64,10 +64,42 @@ class EODHDClient:
         limit: int = 50000,
         exchange: str = "US",
     ) -> List[IntervalData]:
+        """
+        Fetch intraday data from EODHD API.
+        
+        Note: EODHD API only supports 1m, 5m, and 1h intervals.
+        If 30m is requested, this method will fetch 5m data and aggregate to 30m.
+        
+        Args:
+            symbol: Stock symbol
+            start: Start date/time (ISO format or Unix timestamp)
+            end: End date/time (ISO format or Unix timestamp)
+            interval: Data interval - must be 1m, 5m, 1h, or 30m (30m will be aggregated from 5m)
+            limit: Maximum number of bars to return
+            exchange: Exchange code (default: "US")
+            
+        Returns:
+            List of IntervalData bars in the requested interval
+        """
+        # EODHD API only supports 1m, 5m, and 1h intervals
+        # If 30m is requested, fetch 5m and aggregate
+        api_interval = interval
+        needs_aggregation = False
+        
+        if interval == "30m":
+            api_interval = "5m"  # API doesn't support 30m, use 5m
+            needs_aggregation = True
+            LOGGER.debug(f"{symbol}: 30m interval requested, will fetch 5m and aggregate")
+        elif interval not in ["1m", "5m", "1h"]:
+            raise ValueError(
+                f"Unsupported interval: {interval}. EODHD API only supports 1m, 5m, and 1h. "
+                f"For 30m, use interval='30m' and it will be aggregated from 5m data."
+            )
+        
         params: Dict[str, Any] = {
             "api_token": self._config.api_token,
             "fmt": "json",
-            "interval": interval,
+            "interval": api_interval,  # Use API-supported interval
             "limit": limit,
         }
         if start is not None:
@@ -83,10 +115,23 @@ class EODHDClient:
             api_symbol = symbol
 
         path = f"intraday/{api_symbol}"
+        LOGGER.debug(f"API call: {path} with params {params} (requested interval: {interval}, API interval: {api_interval})")
         payload = self._request(path, params)
+        LOGGER.debug(f"API response received: {len(payload) if isinstance(payload, list) else 'non-list'} items")
         if not isinstance(payload, list):
             raise EODHDParsingError("unexpected response format from intraday endpoint")
-        return IntervalData.from_api_list(payload, interval, symbol_override=symbol)
+        
+        # Parse bars using the API interval (5m if we're aggregating to 30m)
+        bars = IntervalData.from_api_list(payload, api_interval, symbol_override=symbol)
+        
+        # Aggregate to 30m if needed
+        if needs_aggregation and bars:
+            LOGGER.debug(f"{symbol}: Aggregating {len(bars)} {api_interval} bars to {interval}")
+            from .bar_aggregator import aggregate_bars
+            bars = aggregate_bars(bars, interval)
+            LOGGER.debug(f"{symbol}: Aggregated to {len(bars)} {interval} bars")
+        
+        return bars
 
     def fetch_eod(
         self,
@@ -159,7 +204,9 @@ class EODHDClient:
         
         # Use realtime endpoint for live data
         path = f"real-time/{api_symbol}"
+        LOGGER.debug(f"API call (live): {path} with params {params}")
         payload = self._request(path, params)
+        LOGGER.debug(f"API response (live) received: {len(payload) if isinstance(payload, (list, dict)) else 'unexpected'} items")
         
         # Realtime endpoint may return single object or list
         if isinstance(payload, dict):
@@ -186,14 +233,23 @@ class EODHDClient:
         backoff = 1.0
 
         for attempt in range(1, self._config.max_retries + 1):
+            LOGGER.debug(f"API request attempt {attempt}/{self._config.max_retries}: {path}")
             self._rate_limiter.acquire()
+            LOGGER.debug(f"Rate limiter acquired, making HTTP request to {url}")
 
+            request_start = time.time()
             try:
                 response = self._session.get(url, params=params, timeout=self._config.timeout)
+                request_duration = time.time() - request_start
+                LOGGER.debug(f"HTTP request completed in {request_duration:.2f}s, status={response.status_code}")
             except requests.RequestException as exc:  # pragma: no cover - network failure
+                request_duration = time.time() - request_start
+                LOGGER.warning(
+                    f"Network error contacting EODHD after {request_duration:.2f}s (attempt {attempt}/{self._config.max_retries}): {exc}"
+                )
                 if attempt == self._config.max_retries:
                     raise EODHDRequestError(f"request failed after retries: {exc}") from exc
-                LOGGER.warning("Network error contacting EODHD (attempt %s/%s)", attempt, self._config.max_retries)
+                LOGGER.debug(f"Retrying after {backoff}s backoff...")
                 time.sleep(backoff)
                 backoff *= 2
                 continue

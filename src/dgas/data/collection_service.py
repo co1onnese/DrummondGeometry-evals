@@ -191,23 +191,33 @@ class DataCollectionService:
         """
         summaries: List[IngestionSummary] = []
         client = self._get_client()
+        
+        logger.info(f"Starting batch collection: {len(symbols)} symbols, interval={interval}")
 
         for i, symbol in enumerate(symbols):
+            symbol_start_time = time.time()
             try:
+                logger.info(f"Processing symbol {i+1}/{len(symbols)}: {symbol}")
+                
                 # Check if symbol has existing data
                 from datetime import datetime, timedelta, timezone
                 from .repository import get_latest_timestamp, ensure_market_symbol
                 from ..db import get_connection
                 
+                logger.debug(f"{symbol}: Checking database for existing data...")
                 with get_connection() as conn:
                     symbol_id = ensure_market_symbol(conn, symbol, exchange)
+                    logger.debug(f"{symbol}: Symbol ID={symbol_id}, checking latest timestamp...")
                     latest_ts = get_latest_timestamp(conn, symbol_id, interval)
+                    logger.debug(f"{symbol}: Latest timestamp={latest_ts}")
                 
                 if latest_ts is None:
                     # No existing data - use backfill
+                    logger.info(f"{symbol}: No existing data, starting backfill (90 days)...")
                     today = datetime.now(timezone.utc).date()
                     start_date = (today - timedelta(days=90)).isoformat()
                     end_date = today.isoformat()
+                    logger.debug(f"{symbol}: Backfill range: {start_date} to {end_date}")
                     summary = backfill_intraday(
                         symbol,
                         exchange=exchange,
@@ -217,8 +227,10 @@ class DataCollectionService:
                         client=client,
                         use_live_for_today=True,
                     )
+                    logger.info(f"{symbol}: Backfill complete - fetched={summary.fetched}, stored={summary.stored}")
                 else:
                     # Has data - use incremental update with live data
+                    logger.info(f"{symbol}: Existing data found (latest: {latest_ts}), doing incremental update...")
                     summary = incremental_update_intraday(
                         symbol,
                         exchange=exchange,
@@ -227,6 +239,10 @@ class DataCollectionService:
                         client=client,
                         use_live_data=True,  # Use live OHLCV for today's data
                     )
+                    logger.info(f"{symbol}: Incremental update complete - fetched={summary.fetched}, stored={summary.stored}")
+                
+                symbol_duration = time.time() - symbol_start_time
+                logger.debug(f"{symbol}: Completed in {symbol_duration:.2f}s")
                 summaries.append(summary)
 
                 if self.config.log_collection_stats:
@@ -237,7 +253,9 @@ class DataCollectionService:
 
             except EODHDRequestError as e:
                 # Handle API errors - check for 404 (invalid symbol)
+                symbol_duration = time.time() - symbol_start_time
                 error_msg = str(e)
+                logger.warning(f"{symbol}: EODHDRequestError after {symbol_duration:.2f}s: {error_msg}")
                 if "404" in error_msg or "Ticker Not Found" in error_msg:
                     # Invalid symbol - skip gracefully, don't count as failure
                     logger.warning(
@@ -310,7 +328,11 @@ class DataCollectionService:
                     )
                     summaries.append(error_summary)
             except Exception as e:
-                logger.error(f"Failed to collect {symbol}: {e}", exc_info=True)
+                symbol_duration = time.time() - symbol_start_time
+                logger.error(
+                    f"{symbol}: Unexpected error after {symbol_duration:.2f}s: {e}", 
+                    exc_info=True
+                )
                 # Continue with other symbols even if one fails
                 # Create a summary with zero results to track the failure
                 from .quality import DataQualityReport
@@ -381,9 +403,18 @@ class DataCollectionService:
         )
 
         # Process batches sequentially (for now, concurrent batches can be added later)
+        batch_start_time = time.time()
         for batch_num, batch in enumerate(batches, 1):
             try:
+                logger.info(
+                    f"Starting batch {batch_num}/{len(batches)}: {len(batch)} symbols "
+                    f"({', '.join(batch[:3])}{'...' if len(batch) > 3 else ''})"
+                )
+                batch_start = time.time()
+                
                 batch_summaries = self.collect_batch(batch, interval, exchange)
+                batch_duration = time.time() - batch_start
+                
                 all_summaries.extend(batch_summaries)
 
                 # Log batch progress
@@ -392,13 +423,24 @@ class DataCollectionService:
                 batch_stored = sum(s.stored for s in batch_summaries)
 
                 logger.info(
-                    f"Batch {batch_num}/{len(batches)} complete: "
+                    f"Batch {batch_num}/{len(batches)} complete in {batch_duration:.1f}s: "
                     f"{batch_updated}/{len(batch)} symbols updated, "
                     f"{batch_fetched} fetched, {batch_stored} stored"
+                )
+                
+                # Log overall progress
+                total_elapsed = time.time() - batch_start_time
+                total_processed = sum(len(batches[i]) for i in range(batch_num))
+                total_remaining = len(valid_symbols) - total_processed
+                logger.info(
+                    f"Overall progress: {total_processed}/{len(valid_symbols)} symbols processed "
+                    f"({total_processed/len(valid_symbols)*100:.1f}%), "
+                    f"{total_remaining} remaining, {total_elapsed/60:.1f} minutes elapsed"
                 )
 
                 # Delay between batches (except after last batch)
                 if batch_num < len(batches) and self.config.delay_between_batches > 0:
+                    logger.debug(f"Waiting {self.config.delay_between_batches}s before next batch...")
                     time.sleep(self.config.delay_between_batches)
 
             except Exception as e:

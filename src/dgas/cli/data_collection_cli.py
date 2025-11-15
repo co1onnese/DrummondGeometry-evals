@@ -338,11 +338,7 @@ def _status_data_collection(args: Namespace) -> int:
         unified_settings = load_settings(config_file=config_path)
         dc_config = unified_settings.data_collection or DataCollectionConfig()
 
-        # Create temporary scheduler to get status
-        legacy_settings = Settings()
-        client = EODHDClient(EODHDConfig.from_settings(legacy_settings))
-        service = DataCollectionService(dc_config, client=client)
-
+        # Get symbols count
         symbols = unified_settings.scheduler_symbols or []
         if not symbols:
             from dgas.db import get_connection
@@ -351,51 +347,104 @@ def _status_data_collection(args: Namespace) -> int:
                     cur.execute("SELECT symbol FROM market_symbols WHERE is_active = true ORDER BY symbol")
                     symbols = [row[0] for row in cur.fetchall()]
 
+        # Get last run from database (more reliable than scheduler state)
+        last_run_time = None
+        last_result = None
+        try:
+            from dgas.db import get_connection
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT run_timestamp, symbols_updated, symbols_requested, 
+                               bars_stored, execution_time_ms, status, error_count
+                        FROM data_collection_runs
+                        ORDER BY run_timestamp DESC
+                        LIMIT 1
+                    """)
+                    row = cur.fetchone()
+                    if row:
+                        last_run_time = row[0]
+                        last_result = {
+                            "symbols_updated": row[1],
+                            "symbols_requested": row[2],
+                            "bars_stored": row[3],
+                            "execution_time_ms": row[4],
+                            "status": row[5],
+                            "errors": row[6],
+                        }
+        except Exception as e:
+            logger.debug(f"Could not get last run from database: {e}")
+
+        # Create temporary scheduler to get config-based status (interval, market hours, etc.)
+        legacy_settings = Settings()
+        client = EODHDClient(EODHDConfig.from_settings(legacy_settings))
+        service = DataCollectionService(dc_config, client=client)
+
         scheduler = DataCollectionScheduler(
             config=dc_config,
             symbols=symbols,
             service=service,
         )
 
-        status = scheduler.get_status()
+        # Get config-based status (interval, market hours)
+        config_status = scheduler.get_status()
 
         # Display status
         table = Table(title="Data Collection Service Status")
         table.add_column("Property", style="cyan")
         table.add_column("Value", style="green")
 
-        table.add_row("Status", "🟢 Running" if status["running"] else "🔴 Stopped")
+        # Process is running, so show Running (not based on new scheduler instance state)
+        table.add_row("Status", "🟢 Running")
         table.add_row("PID", str(pid))
-        table.add_row("Enabled", "Yes" if status["enabled"] else "No")
-        table.add_row("Symbols", str(status["symbols"]))
-        table.add_row("Current Interval", status["current_interval"])
-        table.add_row("Market Open", "Yes" if status["market_open"] else "No")
-        table.add_row("Last Run", status["last_run_time"] or "Never")
+        table.add_row("Enabled", "Yes" if config_status["enabled"] else "No")
+        table.add_row("Symbols", str(len(symbols)))
+        table.add_row("Current Interval", config_status["current_interval"])
+        table.add_row("Market Open", "Yes" if config_status["market_open"] else "No")
+        
+        # Use last run from database
+        if last_run_time:
+            from datetime import datetime, timezone
+            if isinstance(last_run_time, datetime):
+                if last_run_time.tzinfo is None:
+                    last_run_time = last_run_time.replace(tzinfo=timezone.utc)
+                age = datetime.now(timezone.utc) - last_run_time
+                age_str = f"{last_run_time.strftime('%Y-%m-%d %H:%M:%S')} ({age.total_seconds()/60:.1f} min ago)"
+            else:
+                age_str = str(last_run_time)
+            table.add_row("Last Run", age_str)
+        else:
+            table.add_row("Last Run", "Never")
 
-        if status.get("last_result"):
-            lr = status["last_result"]
+        # Show last result from database
+        if last_result:
             table.add_row("", "")
             table.add_row("Last Collection Result", "")
-            table.add_row("  Symbols Updated", f"{lr['symbols_updated']}/{lr['symbols_requested']}")
-            table.add_row("  Bars Stored", str(lr["bars_stored"]))
-            table.add_row("  Execution Time", f"{lr['execution_time_ms']}ms")
-            table.add_row("  Errors", str(lr["errors"]))
+            table.add_row("  Status", last_result["status"])
+            table.add_row("  Symbols Updated", f"{last_result['symbols_updated']}/{last_result['symbols_requested']}")
+            table.add_row("  Bars Stored", str(last_result["bars_stored"]))
+            table.add_row("  Execution Time", f"{last_result['execution_time_ms']}ms")
+            table.add_row("  Errors", str(last_result["errors"]))
 
-        # Add WebSocket status
-        if status.get("websocket"):
-            ws = status["websocket"]
+        # Add WebSocket status (from service, not scheduler)
+        ws_status = service.get_websocket_status()
+        if ws_status:
             table.add_row("", "")
             table.add_row("WebSocket Status", "")
-            table.add_row("  Started", "Yes" if ws.get("started") else "No")
-            if ws.get("client_status"):
-                cs = ws["client_status"]
+            table.add_row("  Started", "Yes" if ws_status.get("client_connected", False) else "No")
+            if ws_status.get("client_status"):
+                cs = ws_status["client_status"]
                 table.add_row("  Connections", f"{cs.get('connected', 0)}/{cs.get('connections', 0)}")
                 table.add_row("  Total Symbols", str(cs.get("total_symbols", 0)))
                 table.add_row("  Messages Received", str(cs.get("total_messages_received", 0)))
-            table.add_row("  Bars Buffered", str(ws.get("bars_buffered", 0)))
-            table.add_row("  Bars Stored", str(ws.get("stats", {}).get("bars_stored", 0)))
+            table.add_row("  Bars Buffered", str(ws_status.get("bars_buffered", 0)))
+            table.add_row("  Bars Stored", str(ws_status.get("stats", {}).get("bars_stored", 0)))
 
         console.print(table)
+        
+        # Clean up
+        service.close()
+        
         return 0
 
     except Exception as e:

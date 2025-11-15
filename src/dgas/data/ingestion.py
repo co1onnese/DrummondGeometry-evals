@@ -71,47 +71,66 @@ def backfill_intraday(
     
     start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
     end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
-    today = datetime.now(timezone.utc).date()
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    
+    # EODHD API: Data is delayed 2-3 hours after market close
+    # Don't request today's data via historical endpoint if it's too recent
+    # Use yesterday as cutoff if we're within the delay window (assume 3 hours for safety)
+    from zoneinfo import ZoneInfo
+    et_tz = ZoneInfo("America/New_York")
+    now_et = now.astimezone(et_tz)
+    
+    # Market typically closes at 4:00 PM ET
+    # Add 3 hours delay = 7:00 PM ET
+    # If current time is before 7:00 PM ET on a trading day, data for today isn't finalized yet
+    market_close_et = now_et.replace(hour=16, minute=0, second=0, microsecond=0)  # 4:00 PM ET
+    data_available_et = market_close_et.replace(hour=19, minute=0)  # 7:00 PM ET (3 hours after close)
+    
+    # Determine latest date we can safely request via historical endpoint
+    if now_et.hour < 19 or (now_et.date() == today and now_et < data_available_et):
+        # Within delay window - use yesterday as latest safe date
+        latest_safe_date = today - timedelta(days=1)
+        LOGGER.info(f"{symbol}: Within API delay window, using {latest_safe_date} as latest safe date for historical endpoint")
+    else:
+        # Past delay window - today's data should be available
+        latest_safe_date = today
     
     all_bars: List[IntervalData] = []
     
+    LOGGER.info(f"{symbol}: Starting backfill from {start_date} to {end_date}, interval={interval}")
+    LOGGER.debug(f"{symbol}: Latest safe date for historical endpoint: {latest_safe_date}")
+    
     with _client_context(client) as api:
         # Fetch historical data
-        # If end_date is in the future, only fetch up to today
-        # If end_date is today or in the past, use the requested end_date
-        # (Don't cap to yesterday - let the user request specific dates)
-        if end_dt > today:
-            # End date is in future - only fetch up to today
-            historical_end = today
+        # Cap to latest_safe_date to avoid requesting data that isn't finalized yet
+        if end_dt > latest_safe_date:
+            # End date is too recent - only fetch up to latest_safe_date
+            historical_end = latest_safe_date
+            LOGGER.info(f"{symbol}: End date {end_dt} is too recent, capping to {historical_end} for historical endpoint")
         else:
             # Use the requested end_date (could be today or in the past)
             historical_end = end_dt
         
         if start_dt <= historical_end:
-            # EODHD API only supports 1m, 5m, and 1h intervals
-            # If requesting 30m, fetch 5m and aggregate to 30m
-            if interval == "30m":
-                LOGGER.info(f"{symbol}: 30m not supported by API, fetching 5m and aggregating")
-                bars_5m = api.fetch_intraday(symbol, start=start_date, end=historical_end.isoformat(), interval="5m", exchange=exchange)
-                if bars_5m:
-                    LOGGER.info(f"{symbol}: Fetched {len(bars_5m)} 5m bars, aggregating to 30m")
-                    bars = aggregate_bars(bars_5m, "30m")
-                    LOGGER.info(f"{symbol}: Aggregated to {len(bars)} 30m bars")
-                else:
-                    bars = []
-            else:
-                # For valid intervals (1m, 5m, 1h), fetch directly
-                bars = api.fetch_intraday(symbol, start=start_date, end=historical_end.isoformat(), interval=interval, exchange=exchange)
+            # fetch_intraday now handles 30m -> 5m conversion and aggregation automatically
+            LOGGER.debug(f"{symbol}: Calling API fetch_intraday for {interval} data (will auto-convert 30m to 5m if needed)...")
+            bars = api.fetch_intraday(symbol, start=start_date, end=historical_end.isoformat(), interval=interval, exchange=exchange)
+            LOGGER.debug(f"{symbol}: API returned {len(bars) if bars else 0} {interval} bars")
             
             all_bars.extend(bars)
             LOGGER.debug(f"{symbol}: Fetched {len(bars)} historical bars from {start_date} to {historical_end}")
         
         # Fetch today's data using live endpoint if end_date includes today
+        # Only try live endpoint if we're requesting today's data
+        # Note: Live endpoint may work even if historical doesn't (due to delay)
         if end_dt >= today and use_live_for_today:
             try:
                 # Live endpoint: use 5m if requesting 30m (API only supports 1m, 5m, 1h)
                 live_interval = "5m" if interval == "30m" else interval
+                LOGGER.info(f"{symbol}: Attempting to fetch today's data via live endpoint (data may be delayed 2-3h after market close)...")
                 live_bars = api.fetch_live_ohlcv(symbol, interval=live_interval, exchange=exchange)
+                LOGGER.debug(f"{symbol}: API returned {len(live_bars) if live_bars else 0} live bars")
                 if live_bars:
                     # Filter to only today's bars
                     today_bars = [b for b in live_bars if b.timestamp.date() == today]
@@ -122,26 +141,44 @@ def backfill_intraday(
                         LOGGER.debug(f"{symbol}: Aggregated {len(live_bars)} live 5m bars to {len(today_bars)} 30m bars")
                     
                     all_bars.extend(today_bars)
-                    LOGGER.debug(f"{symbol}: Fetched {len(today_bars)} live bars for today")
+                    LOGGER.info(f"{symbol}: Fetched {len(today_bars)} live bars for today")
+                else:
+                    LOGGER.warning(f"{symbol}: Live endpoint returned no data for today (may be outside trading hours or data not available yet)")
             except Exception as e:
-                LOGGER.warning(f"{symbol}: Failed to fetch live data: {e}, using historical only")
-                # Fall back: try historical for today if live fails
-                if end_dt >= today:
+                LOGGER.warning(f"{symbol}: Failed to fetch live data: {e}")
+                # Don't fall back to historical for today if we're within delay window
+                # Historical endpoint won't have today's data until 2-3 hours after market close
+                if end_dt >= today and now_et >= data_available_et:
+                    # Past delay window - try historical as fallback
                     try:
-                        today_bars = api.fetch_intraday(symbol, start=today.isoformat(), end=today.isoformat(), interval=interval, exchange=exchange)
+                        LOGGER.info(f"{symbol}: Past delay window, trying historical endpoint for today as fallback...")
+                        # fetch_intraday handles 30m -> 5m conversion and aggregation automatically
+                        today_bars = api.fetch_intraday(
+                            symbol, 
+                            start=today.isoformat(), 
+                            end=today.isoformat(), 
+                            interval=interval,  # Client will convert 30m to 5m and aggregate
+                            exchange=exchange
+                        )
                         all_bars.extend(today_bars)
-                        LOGGER.debug(f"{symbol}: Fetched {len(today_bars)} historical bars for today (fallback)")
+                        LOGGER.info(f"{symbol}: Fetched {len(today_bars)} historical {interval} bars for today (fallback)")
                     except Exception as e2:
                         LOGGER.warning(f"{symbol}: Failed to fetch today's data via historical endpoint: {e2}")
+                else:
+                    LOGGER.info(f"{symbol}: Within delay window, skipping historical fallback for today (data not finalized yet)")
 
+    LOGGER.debug(f"{symbol}: Analyzing quality of {len(all_bars)} bars...")
     quality = analyze_intervals(all_bars)
+    LOGGER.debug(f"{symbol}: Quality analysis complete")
 
     stored = 0
     if all_bars:
         exchange_value = all_bars[0].exchange or exchange
+        LOGGER.debug(f"{symbol}: Storing {len(all_bars)} bars to database...")
         with get_connection() as conn:
             symbol_id = ensure_market_symbol(conn, symbol, exchange_value)
             stored = bulk_upsert_market_data(conn, symbol_id, interval, all_bars)
+        LOGGER.debug(f"{symbol}: Stored {stored} bars to database")
 
     LOGGER.info(
         "Backfill complete: %s (%s) fetched=%s stored=%s duplicates=%s gaps=%s",
@@ -231,11 +268,13 @@ def incremental_update_intraday(
         client: Optional EODHD client
         use_live_data: If True, use live endpoint for today's data (default: True)
     """
+    LOGGER.debug(f"{symbol}: Starting incremental update, interval={interval}")
 
     latest_ts: datetime | None
     with get_connection() as conn:
         symbol_id = ensure_market_symbol(conn, symbol, exchange)
         latest_ts = get_latest_timestamp(conn, symbol_id, interval)
+    LOGGER.debug(f"{symbol}: Latest timestamp from DB: {latest_ts}")
 
     now = datetime.now(timezone.utc)
     today = now.date()
@@ -271,13 +310,22 @@ def incremental_update_intraday(
         if need_recent_data and use_live_data:
             try:
                 LOGGER.debug(f"{symbol}: Fetching live/realtime data")
-                live_bars = api.fetch_live_ohlcv(symbol, interval=interval, exchange=exchange)
+                # Live endpoint only supports 1m, 5m, 1h - use 5m if requesting 30m
+                live_interval = "5m" if interval == "30m" else interval
+                live_bars = api.fetch_live_ohlcv(symbol, interval=live_interval, exchange=exchange)
                 if live_bars:
                     # Filter to recent bars (today or yesterday) - live endpoint has latest available
                     recent_bars = [b for b in live_bars if b.timestamp.date() >= yesterday]
+                    
+                    # If we fetched 5m but need 30m, aggregate
+                    if interval == "30m" and recent_bars:
+                        from .bar_aggregator import aggregate_bars
+                        recent_bars = aggregate_bars(recent_bars, "30m")
+                        LOGGER.debug(f"{symbol}: Aggregated live bars to {len(recent_bars)} 30m bars")
+                    
                     all_bars.extend(recent_bars)
                     total_fetched += len(recent_bars)
-                    LOGGER.debug(f"{symbol}: Fetched {len(recent_bars)} live bars (dates: {[b.timestamp.date() for b in recent_bars]})")
+                    LOGGER.debug(f"{symbol}: Fetched {len(recent_bars)} live {interval} bars (dates: {[b.timestamp.date() for b in recent_bars]})")
             except Exception as e:
                 LOGGER.warning(f"{symbol}: Failed to fetch live data: {e}, falling back to historical")
                 # Fall back to historical for recent dates if live fails
@@ -315,13 +363,25 @@ def incremental_update_intraday(
                     LOGGER.warning(f"{symbol}: Failed to fetch historical data: {e}")
                     # Continue - we may still have today's data from live endpoint
     
-    # Step 3: Store all bars
+    # Step 3: Filter out bars that are older than what we already have
+    if all_bars and latest_ts:
+        # Only keep bars that are newer than the latest timestamp in DB
+        filtered_bars = [b for b in all_bars if b.timestamp > latest_ts]
+        if len(filtered_bars) < len(all_bars):
+            skipped = len(all_bars) - len(filtered_bars)
+            LOGGER.info(f"{symbol}: Filtered out {skipped} bars that are older than latest DB timestamp ({latest_ts})")
+            all_bars = filtered_bars
+    
+    # Step 4: Store all bars
     if all_bars:
+        LOGGER.debug(f"{symbol}: Analyzing quality of {len(all_bars)} bars...")
         quality = analyze_intervals(all_bars)
         exchange_value = all_bars[0].exchange or exchange
+        LOGGER.debug(f"{symbol}: Storing {len(all_bars)} bars to database...")
         with get_connection() as conn:
             symbol_id = ensure_market_symbol(conn, symbol, exchange_value)
             total_stored = bulk_upsert_market_data(conn, symbol_id, interval, all_bars)
+        LOGGER.debug(f"{symbol}: Stored {total_stored} bars to database")
         
         LOGGER.info(
             f"Incremental update: {symbol} ({interval}) fetched={total_fetched} stored={total_stored} "
