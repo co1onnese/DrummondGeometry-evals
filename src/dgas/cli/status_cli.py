@@ -195,7 +195,7 @@ def _gather_status_info(settings: Any) -> Dict[str, Any]:
                     """
                     SELECT COUNT(*)
                     FROM prediction_runs
-                    WHERE timestamp > NOW() - INTERVAL '24 hours'
+                    WHERE run_timestamp > NOW() - INTERVAL '24 hours'
                     """
                 )
                 info["predictions"]["runs_last_24h"] = cur.fetchone()[0] or 0
@@ -204,9 +204,9 @@ def _gather_status_info(settings: Any) -> Dict[str, Any]:
                 cur.execute(
                     """
                     SELECT COUNT(*)
-                    FROM prediction_signals ps
+                    FROM generated_signals ps
                     JOIN prediction_runs pr ON pr.run_id = ps.run_id
-                    WHERE pr.timestamp > NOW() - INTERVAL '24 hours'
+                    WHERE pr.run_timestamp > NOW() - INTERVAL '24 hours'
                     """
                 )
                 info["predictions"]["signals_last_24h"] = cur.fetchone()[0] or 0
@@ -214,9 +214,9 @@ def _gather_status_info(settings: Any) -> Dict[str, Any]:
                 # Latest run
                 cur.execute(
                     """
-                    SELECT timestamp, symbols_processed, signals_generated
+                    SELECT run_timestamp, symbols_processed, signals_generated
                     FROM prediction_runs
-                    ORDER BY timestamp DESC
+                    ORDER BY run_timestamp DESC
                     LIMIT 1
                     """
                 )

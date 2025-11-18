@@ -350,16 +350,16 @@ def _prediction_report_command(args: Namespace) -> int:
         query = """
             SELECT
                 pr.run_id,
-                pr.timestamp,
+                pr.run_timestamp,
                 pr.symbols_processed,
                 pr.signals_generated,
                 pr.execution_time_ms,
                 COUNT(ps.signal_id) as signal_count
             FROM prediction_runs pr
-            LEFT JOIN prediction_signals ps ON ps.run_id = pr.run_id
-            WHERE pr.timestamp >= %s
-            GROUP BY pr.run_id, pr.timestamp, pr.symbols_processed, pr.signals_generated, pr.execution_time_ms
-            ORDER BY pr.timestamp DESC
+            LEFT JOIN generated_signals ps ON ps.run_id = pr.run_id
+            WHERE pr.run_timestamp >= %s
+            GROUP BY pr.run_id, pr.run_timestamp, pr.symbols_processed, pr.signals_generated, pr.execution_time_ms
+            ORDER BY pr.run_timestamp DESC
         """
 
         runs = []
@@ -371,22 +371,23 @@ def _prediction_report_command(args: Namespace) -> int:
         # Query signals
         signal_query = """
             SELECT
-                ps.symbol,
+                s.symbol,
                 ps.signal_type,
                 ps.confidence,
                 ps.entry_price,
                 ps.target_price,
                 ps.stop_loss,
                 ps.signal_timestamp
-            FROM prediction_signals ps
+            FROM generated_signals ps
             JOIN prediction_runs pr ON pr.run_id = ps.run_id
-            WHERE pr.timestamp >= %s
+            JOIN market_symbols s ON s.symbol_id = ps.symbol_id
+            WHERE pr.run_timestamp >= %s
               AND ps.confidence >= %s
         """
         params = [since, args.min_confidence]
 
         if args.symbol:
-            signal_query += " AND ps.symbol = %s"
+            signal_query += " AND s.symbol = %s"
             params.append(args.symbol)
 
         signal_query += " ORDER BY ps.signal_timestamp DESC LIMIT 50"
