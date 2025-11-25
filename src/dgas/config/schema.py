@@ -194,12 +194,12 @@ class DataCollectionConfig(BaseModel):
         pattern="^(1m|5m|15m|30m|1h)$",
     )
     interval_after_hours: str = Field(
-        default="15m",
+        default="5m",
         description="Collection interval after market hours",
         pattern="^(1m|5m|15m|30m|1h)$",
     )
     interval_weekends: str = Field(
-        default="30m",
+        default="5m",
         description="Collection interval on weekends",
         pattern="^(1m|5m|15m|30m|1h)$",
     )

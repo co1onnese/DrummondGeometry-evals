@@ -1,147 +1,255 @@
 #!/usr/bin/env python3
 """
-Check for data gaps in the database up to November 10, 2025.
-Reports symbols with missing data or gaps.
+Script to check for data gaps in the market_data table.
+Identifies missing data that the prediction engine may require.
 """
 
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from collections import defaultdict
+from typing import Dict, List, Tuple
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from dgas.db import get_connection
-from dgas.data.repository import get_latest_timestamp, ensure_market_symbol
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
-def check_data_gaps(interval: str = "30m", target_date: str = "2025-11-10"):
-    """Check for data gaps up to target date."""
+def load_env_file():
+    """Manually load .env file"""
+    env_path = Path(__file__).parent.parent / '.env'
+    if env_path.exists():
+        with open(env_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    # Remove quotes if present
+                    value = value.strip('"').strip("'")
+                    os.environ[key] = value
+
+# Load environment variables
+load_env_file()
+
+def get_db_connection():
+    """Create database connection using credentials from .env"""
+    db_url = os.getenv('DGAS_DATABASE_URL')
+    if not db_url:
+        raise ValueError("DGAS_DATABASE_URL not found in .env")
     
-    target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
-    now = datetime.now(timezone.utc)
+    # Convert SQLAlchemy format to psycopg2 format
+    # postgresql+psycopg://user:pass@host:port/db -> postgresql://user:pass@host:port/db
+    if db_url.startswith('postgresql+psycopg://'):
+        db_url = db_url.replace('postgresql+psycopg://', 'postgresql://')
     
-    print(f"Checking data gaps for {interval} interval up to {target_date}")
-    print("=" * 70)
+    return psycopg2.connect(db_url)
+
+def get_active_symbols(conn) -> List[Dict]:
+    """Get all active symbols from the database"""
+    query = """
+        SELECT symbol_id, symbol, exchange, is_active
+        FROM market_symbols
+        WHERE is_active = true
+        ORDER BY symbol
+    """
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(query)
+        return cur.fetchall()
+
+def check_symbol_data_gaps(conn, symbol_id: int, symbol: str, interval: str = '5m') -> Dict:
+    """
+    Check for data gaps for a specific symbol.
+    Returns information about data coverage and gaps.
+    """
+    # Get data range and count
+    query = """
+        SELECT 
+            COUNT(*) as bar_count,
+            MIN(timestamp) as first_bar,
+            MAX(timestamp) as last_bar,
+            MAX(timestamp) - MIN(timestamp) as data_span
+        FROM market_data
+        WHERE symbol_id = %s AND interval_type = %s
+    """
     
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT symbol FROM market_symbols WHERE is_active = true ORDER BY symbol")
-            symbols = [row[0] for row in cur.fetchall()]
-    
-    print(f"Checking {len(symbols)} symbols...\n")
-    
-    no_data = []
-    gaps = []
-    up_to_date = []
-    stale = []
-    
-    # Expected interval in minutes
-    interval_minutes = {
-        "1m": 1,
-        "5m": 5,
-        "15m": 15,
-        "30m": 30,
-        "1h": 60,
-    }.get(interval, 30)
-    
-    # Check each symbol (use fresh connection for each to avoid connection issues)
-    for i, symbol in enumerate(symbols, 1):
-        if i % 50 == 0:
-            print(f"  Progress: {i}/{len(symbols)} symbols checked...")
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(query, (symbol_id, interval))
+        result = cur.fetchone()
         
-        try:
-            with get_connection() as conn:
-                symbol_id = ensure_market_symbol(conn, symbol, "US")
-                latest_ts = get_latest_timestamp(conn, symbol_id, interval)
+        if not result or result['bar_count'] == 0:
+            return {
+                'symbol': symbol,
+                'interval': interval,
+                'status': 'NO_DATA',
+                'bar_count': 0,
+                'first_bar': None,
+                'last_bar': None,
+                'gaps': []
+            }
+        
+        # Check for gaps (missing consecutive bars)
+        gap_query = """
+            WITH consecutive_bars AS (
+                SELECT 
+                    timestamp,
+                    LAG(timestamp) OVER (ORDER BY timestamp) as prev_timestamp,
+                    timestamp - LAG(timestamp) OVER (ORDER BY timestamp) as time_diff
+                FROM market_data
+                WHERE symbol_id = %s AND interval_type = %s
+                ORDER BY timestamp
+            )
+            SELECT 
+                prev_timestamp as gap_start,
+                timestamp as gap_end,
+                time_diff,
+                EXTRACT(EPOCH FROM time_diff) / 60 as gap_minutes
+            FROM consecutive_bars
+            WHERE time_diff > INTERVAL '5 minutes'  -- For 5m bars, gap if >5 min
+                AND EXTRACT(DOW FROM timestamp) BETWEEN 1 AND 5  -- Weekdays only
+                AND EXTRACT(HOUR FROM timestamp AT TIME ZONE 'America/New_York') BETWEEN 4 AND 20  -- Extended hours
+            ORDER BY prev_timestamp
+            LIMIT 20  -- Show first 20 gaps
+        """
+        
+        cur.execute(gap_query, (symbol_id, interval))
+        gaps = cur.fetchall()
+        
+        # Calculate data freshness
+        now = datetime.now(timezone.utc)
+        last_bar_time = result['last_bar']
+        if last_bar_time:
+            hours_since_last = (now - last_bar_time).total_seconds() / 3600
+        else:
+            hours_since_last = None
+        
+        return {
+            'symbol': symbol,
+            'interval': interval,
+            'status': 'OK' if len(gaps) == 0 else 'HAS_GAPS',
+            'bar_count': result['bar_count'],
+            'first_bar': result['first_bar'],
+            'last_bar': result['last_bar'],
+            'hours_since_last': hours_since_last,
+            'gap_count': len(gaps),
+            'gaps': gaps[:5]  # Show first 5 gaps for brevity
+        }
+
+def main():
+    """Main function to check all symbols for data gaps"""
+    print("=" * 80)
+    print("DATA GAP ANALYSIS FOR PREDICTION ENGINE")
+    print("=" * 80)
+    print()
+    
+    conn = get_db_connection()
+    
+    try:
+        # Get all active symbols
+        symbols = get_active_symbols(conn)
+        print(f"Found {len(symbols)} active symbols in database")
+        print()
+        
+        # Categories for analysis
+        no_data_symbols = []
+        stale_symbols = []  # >24 hours old
+        gap_symbols = []
+        good_symbols = []
+        
+        # Check each symbol
+        for sym in symbols:
+            result = check_symbol_data_gaps(conn, sym['symbol_id'], sym['symbol'], '5m')
             
-                if latest_ts is None:
-                    no_data.append(symbol)
-                else:
-                    latest_date = latest_ts.date()
-                    age_days = (now.date() - latest_date).days
-                    
-                    if latest_date >= target_dt:
-                        up_to_date.append((symbol, latest_date))
-                    elif latest_date < target_dt:
-                        days_behind = (target_dt - latest_date).days
-                        stale.append((symbol, latest_date, days_behind))
-        except Exception as e:
-            gaps.append((symbol, f"Error: {e}"))
-    
-    # Print report
-    print("\n" + "=" * 70)
-    print("DATA GAP REPORT")
-    print("=" * 70)
-    print(f"Target date: {target_date}")
-    print(f"Interval: {interval}")
-    print(f"\nSummary:")
-    print(f"  ✓ Up to date (>= {target_date}): {len(up_to_date)}")
-    print(f"  ⚠ Stale (< {target_date}): {len(stale)}")
-    print(f"  ✗ No data: {len(no_data)}")
-    print(f"  ❌ Errors: {len(gaps)}")
-    
-    if up_to_date:
-        print(f"\n✓ Up to date symbols ({len(up_to_date)}):")
-        for symbol, date in up_to_date[:10]:
-            print(f"  - {symbol}: {date}")
-        if len(up_to_date) > 10:
-            print(f"  ... and {len(up_to_date) - 10} more")
-    
-    if stale:
-        print(f"\n⚠ Stale symbols (need backfill, {len(stale)}):")
-        # Sort by days behind
-        stale_sorted = sorted(stale, key=lambda x: x[2], reverse=True)
-        for symbol, date, days_behind in stale_sorted[:20]:
-            print(f"  - {symbol}: Latest = {date} ({days_behind} days behind target)")
-        if len(stale) > 20:
-            print(f"  ... and {len(stale) - 20} more")
-    
-    if no_data:
-        print(f"\n✗ Symbols with no data ({len(no_data)}):")
-        for symbol in no_data[:20]:
-            print(f"  - {symbol}")
-        if len(no_data) > 20:
-            print(f"  ... and {len(no_data) - 20} more")
-    
-    if gaps:
-        print(f"\n❌ Symbols with errors ({len(gaps)}):")
-        for symbol, error in gaps[:10]:
-            print(f"  - {symbol}: {error}")
-        if len(gaps) > 10:
-            print(f"  ... and {len(gaps) - 10} more")
-    
-    # Return summary
-    return {
-        "total": len(symbols),
-        "up_to_date": len(up_to_date),
-        "stale": len(stale),
-        "no_data": len(no_data),
-        "errors": len(gaps),
-    }
+            if result['status'] == 'NO_DATA':
+                no_data_symbols.append(result)
+            elif result['hours_since_last'] and result['hours_since_last'] > 24:
+                stale_symbols.append(result)
+            elif result['gap_count'] > 0:
+                gap_symbols.append(result)
+            else:
+                good_symbols.append(result)
+        
+        # Print summary
+        print("SUMMARY")
+        print("-" * 40)
+        print(f"✓ Good symbols (no gaps, fresh data): {len(good_symbols)}")
+        print(f"⚠ Symbols with gaps: {len(gap_symbols)}")
+        print(f"⏰ Stale symbols (>24h old): {len(stale_symbols)}")
+        print(f"✗ Symbols with no data: {len(no_data_symbols)}")
+        print()
+        
+        # Show problematic symbols
+        if no_data_symbols:
+            print("SYMBOLS WITH NO DATA (need full backfill):")
+            print("-" * 40)
+            for sym in no_data_symbols[:10]:  # Show first 10
+                print(f"  - {sym['symbol']}")
+            if len(no_data_symbols) > 10:
+                print(f"  ... and {len(no_data_symbols) - 10} more")
+            print()
+        
+        if stale_symbols:
+            print("STALE SYMBOLS (>24 hours old, need update):")
+            print("-" * 40)
+            for sym in sorted(stale_symbols, key=lambda x: x['hours_since_last'], reverse=True)[:10]:
+                print(f"  - {sym['symbol']}: Last bar {sym['hours_since_last']:.1f} hours ago ({sym['last_bar']})")
+            if len(stale_symbols) > 10:
+                print(f"  ... and {len(stale_symbols) - 10} more")
+            print()
+        
+        if gap_symbols:
+            print("SYMBOLS WITH DATA GAPS:")
+            print("-" * 40)
+            for sym in sorted(gap_symbols, key=lambda x: x['gap_count'], reverse=True)[:10]:
+                print(f"  - {sym['symbol']}: {sym['gap_count']} gaps, {sym['bar_count']} total bars")
+                if sym['gaps']:
+                    first_gap = sym['gaps'][0]
+                    print(f"    First gap: {first_gap['gap_start']} to {first_gap['gap_end']} ({first_gap['gap_minutes']:.0f} min)")
+            if len(gap_symbols) > 10:
+                print(f"  ... and {len(gap_symbols) - 10} more")
+            print()
+        
+        # Overall statistics
+        print("OVERALL STATISTICS")
+        print("-" * 40)
+        
+        # Get total bar count and date range
+        stats_query = """
+            SELECT 
+                COUNT(*) as total_bars,
+                COUNT(DISTINCT symbol_id) as symbols_with_data,
+                MIN(timestamp) as earliest_bar,
+                MAX(timestamp) as latest_bar
+            FROM market_data
+            WHERE interval_type = '5m'
+        """
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(stats_query)
+            stats = cur.fetchone()
+        
+        print(f"Total 5m bars in database: {stats['total_bars']:,}")
+        print(f"Symbols with data: {stats['symbols_with_data']} / {len(symbols)}")
+        print(f"Date range: {stats['earliest_bar']} to {stats['latest_bar']}")
+        
+        # Check if we need to run backfill
+        if no_data_symbols or stale_symbols:
+            print()
+            print("RECOMMENDED ACTIONS:")
+            print("-" * 40)
+            if no_data_symbols:
+                print(f"1. Run full backfill for {len(no_data_symbols)} symbols with no data")
+            if stale_symbols:
+                print(f"2. Run incremental update for {len(stale_symbols)} stale symbols")
+            if gap_symbols:
+                print(f"3. Run gap fill for {len(gap_symbols)} symbols with gaps")
+            print()
+            print("The prediction engine may not work correctly for symbols with missing data!")
+        else:
+            print()
+            print("✓ All symbols have recent data. Prediction engine should work correctly.")
+        
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Check for data gaps")
-    parser.add_argument(
-        "--interval",
-        default="30m",
-        help="Data interval (default: 30m)",
-        choices=["1m", "5m", "15m", "30m", "1h"]
-    )
-    parser.add_argument(
-        "--target-date",
-        default="2025-11-10",
-        help="Target date to check up to (default: 2025-11-10)"
-    )
-    
-    args = parser.parse_args()
-    
-    summary = check_data_gaps(interval=args.interval, target_date=args.target_date)
-    
-    # Exit with error code if there are gaps
-    if summary["stale"] > 0 or summary["no_data"] > 0:
-        sys.exit(1)
-    else:
-        sys.exit(0)
+    main()

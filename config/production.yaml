@@ -75,14 +75,14 @@ data_collection:
   
   # WebSocket real-time data collection
   use_websocket: true             # Use WebSocket for real-time data during market hours
-  websocket_interval: "30m"       # Interval for WebSocket bar aggregation
+  websocket_interval: "5m"        # Collect native 5m data (aggregated to 30m at consumption)
   
   # Collection intervals (for REST API fallback/after-hours)
-  # Note: Using 30m for all intervals since 5m may not be available from API
-  # and most symbols already have 30m data
-  interval_market_hours: "30m"    # During 9:30am-4pm ET, Mon-Fri (REST fallback only)
-  interval_after_hours: "30m"     # After 4pm or before 9:30am, Mon-Fri
-  interval_weekends: "30m"        # Saturday and Sunday
+  # Note: Collecting native 5m data from API, which is aggregated to 30m
+  # at the consumption layer (prediction engine) to reduce API calls by 83%
+  interval_market_hours: "5m"     # During 9:30am-4pm ET, Mon-Fri (REST fallback only)
+  interval_after_hours: "5m"      # After 4pm or before 9:30am, Mon-Fri
+  interval_weekends: "5m"         # Saturday and Sunday
   
   # Batch processing (for REST API)
   batch_size: 50                  # Symbols per batch

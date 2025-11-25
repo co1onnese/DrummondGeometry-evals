@@ -349,4 +349,97 @@ def fetch_market_data(
     return results
 
 
+def fetch_market_data_with_aggregation(
+    conn: Connection,
+    symbol: str,
+    interval: str,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    limit: int | None = None,
+) -> list[IntervalData]:
+    """
+    Fetch market data, aggregating from smaller intervals if needed.
+    
+    This function first tries to fetch data at the requested interval.
+    If no data exists, it attempts to aggregate from a smaller interval:
+    - 30m requested -> fetch 5m and aggregate
+    - 1h requested -> fetch 5m and aggregate  
+    - 4h requested -> fetch 1h and aggregate
+    
+    This allows the system to store native 5m data from the API and
+    aggregate to larger intervals on-demand, reducing API call waste.
+    
+    Args:
+        conn: Active psycopg connection
+        symbol: Market symbol (e.g., "AAPL")
+        interval: Requested interval (e.g., "30m")
+        start: Optional starting timestamp (inclusive)
+        end: Optional ending timestamp (inclusive)
+        limit: Optional maximum number of bars to return
+        
+    Returns:
+        List of IntervalData in chronological order, either direct from DB
+        or aggregated from smaller interval
+    """
+    # Try direct fetch first
+    data = fetch_market_data(conn, symbol, interval, start=start, end=end, limit=limit)
+    
+    if data:
+        LOGGER.debug(f"{symbol}: Found {len(data)} bars at {interval} interval (direct)")
+        return data
+    
+    # Map intervals to their smaller source intervals for aggregation
+    # Interval seconds for ratio calculation
+    from .bar_aggregator import INTERVAL_SECONDS
+    
+    AGGREGATION_MAP = {
+        "30m": "5m",   # Aggregate 5m -> 30m (6:1 ratio)
+        "1h": "5m",    # Aggregate 5m -> 1h (12:1 ratio)
+        "4h": "1h",    # Aggregate 1h -> 4h (4:1 ratio)
+    }
+    
+    source_interval = AGGREGATION_MAP.get(interval)
+    if not source_interval:
+        LOGGER.debug(f"{symbol}: No data at {interval} and no aggregation path available")
+        return []  # No aggregation path available
+    
+    # Calculate how many source bars we need to get enough aggregated bars
+    source_limit = None
+    if limit:
+        if interval in INTERVAL_SECONDS and source_interval in INTERVAL_SECONDS:
+            ratio = INTERVAL_SECONDS[interval] // INTERVAL_SECONDS[source_interval]
+            source_limit = limit * ratio
+            LOGGER.debug(
+                f"{symbol}: Requesting {source_limit} {source_interval} bars "
+                f"to aggregate {limit} {interval} bars (ratio: {ratio}:1)"
+            )
+    
+    # Fetch source data
+    source_data = fetch_market_data(
+        conn, symbol, source_interval,
+        start=start, end=end, limit=source_limit
+    )
+    
+    if not source_data:
+        LOGGER.debug(f"{symbol}: No {source_interval} data available for aggregation to {interval}")
+        return []
+    
+    # Aggregate to target interval
+    from .bar_aggregator import aggregate_bars
+    aggregated = aggregate_bars(source_data, interval)
+    
+    # Apply limit to aggregated data if needed
+    if limit and len(aggregated) > limit:
+        aggregated = aggregated[-limit:]  # Take most recent N bars
+    
+    LOGGER.debug(
+        f"{symbol}: Aggregated {len(source_data)} {source_interval} bars "
+        f"to {len(aggregated)} {interval} bars"
+    )
+    
+    return aggregated
+
+
 __all__.append("fetch_market_data")
+__all__.append("fetch_market_data_with_aggregation")

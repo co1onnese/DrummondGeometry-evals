@@ -982,57 +982,24 @@ class PredictionEngine:
             List of IntervalData in chronological order
         """
         from ..db import get_connection
+        from ..data.repository import (
+            fetch_market_data_with_aggregation,
+            get_symbol_id,
+        )
 
         with get_connection() as conn:
-            cursor = conn.cursor()
-
-            # Get symbol_id
-            cursor.execute(
-                "SELECT symbol_id FROM market_symbols WHERE symbol = %s",
-                (symbol,)
-            )
-            result = cursor.fetchone()
-            if result is None:
+            symbol_id = get_symbol_id(conn, symbol)
+            if symbol_id is None:
                 raise ValueError(f"Symbol {symbol} not found in database")
-            symbol_id = result[0]
 
-            # Get recent market data
-            cursor.execute(
-                """
-                SELECT
-                    timestamp, open_price, high_price, low_price,
-                    close_price, volume
-                FROM market_data
-                WHERE symbol_id = %s AND interval_type = %s
-                ORDER BY timestamp DESC
-                LIMIT %s
-                """,
-                (symbol_id, interval, self.lookback_bars)
+            data = fetch_market_data_with_aggregation(
+                conn,
+                symbol,
+                interval,
+                limit=self.lookback_bars,
             )
 
-            rows = cursor.fetchall()
-            if not rows:
-                return []
-
-            # Convert to IntervalData (reverse to chronological order)
-            intervals = []
-            for row in reversed(rows):
-                timestamp, open_p, high_p, low_p, close_p, volume = row
-                intervals.append(
-                    IntervalData(
-                        symbol=symbol,
-                        interval=interval,
-                        timestamp=timestamp,
-                        open=Decimal(str(open_p)),
-                        high=Decimal(str(high_p)),
-                        low=Decimal(str(low_p)),
-                        close=Decimal(str(close_p)),
-                        volume=int(volume),
-                        adjusted_close=Decimal(str(close_p)),
-                    )
-                )
-
-            return intervals
+        return data
 
     def _calculate_timeframe_data(
         self,

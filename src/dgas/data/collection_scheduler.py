@@ -180,24 +180,54 @@ class DataCollectionScheduler:
         
         return elapsed_minutes >= interval_minutes
 
+    def _is_extended_hours(self) -> bool:
+        """
+        Check if we're in extended trading hours (4am-8pm ET).
+        
+        Extended hours covers:
+        - Pre-market: 4:00am - 9:30am ET
+        - Regular market: 9:30am - 4:00pm ET  
+        - After-hours: 4:00pm - 8:00pm ET
+        
+        Returns:
+            True if within extended hours (4am-8pm ET on weekdays)
+        """
+        from datetime import datetime, time
+        from zoneinfo import ZoneInfo
+        
+        tz = ZoneInfo("America/New_York")
+        now = datetime.now(tz)
+        
+        # Skip weekends
+        if now.weekday() >= 5:  # Saturday = 5, Sunday = 6
+            return False
+        
+        # Check if within extended hours (4am-8pm ET)
+        current_time = now.time()
+        extended_start = time(4, 0)   # 4:00 AM ET
+        extended_end = time(20, 0)    # 8:00 PM ET
+        
+        return extended_start <= current_time <= extended_end
+
     def _execute_collection_cycle(self) -> None:
         """
         Execute data collection cycle.
 
         This runs every minute but only actually collects data when
         the appropriate interval has elapsed based on market hours.
-        Also manages WebSocket lifecycle based on market hours.
+        Also manages WebSocket lifecycle based on extended hours (4am-8pm ET).
         """
         if self._shutdown_event.is_set():
             logger.debug("Shutdown event set, skipping collection cycle")
             return
 
-        # Manage WebSocket lifecycle based on market hours
-        market_open = self.market_hours.is_market_open()
+        # Manage WebSocket lifecycle based on EXTENDED hours (4am-8pm ET)
+        # This gives us real-time data for pre-market and after-hours trading
+        in_extended_hours = self._is_extended_hours()
 
-        if market_open and not self._websocket_started:
-            # Market just opened - start WebSocket collection
-            logger.info("Market is open - starting WebSocket collection")
+        if in_extended_hours and not self._websocket_started:
+            # Extended hours just started - start WebSocket collection
+            logger.info("Extended hours active (4am-8pm ET) - starting WebSocket collection")
             try:
                 self.service.start_websocket_collection(self.symbols)
                 self._websocket_started = True
@@ -206,24 +236,24 @@ class DataCollectionScheduler:
                 # Fall back to REST API
                 self._websocket_started = False
 
-        elif not market_open and self._websocket_started:
-            # Market just closed - stop WebSocket collection
-            logger.info("Market is closed - stopping WebSocket collection")
+        elif not in_extended_hours and self._websocket_started:
+            # Extended hours ended - stop WebSocket collection
+            logger.info("Extended hours ended (outside 4am-8pm ET) - stopping WebSocket collection")
             try:
                 self.service.stop_websocket_collection()
                 # Store any remaining buffered bars
                 stored = self.service.store_websocket_bars()
                 if stored > 0:
-                    logger.info(f"Stored {stored} remaining WebSocket bars after market close")
+                    logger.info(f"Stored {stored} remaining WebSocket bars after extended hours")
             except Exception as e:
                 logger.error(f"Error stopping WebSocket collection: {e}", exc_info=True)
             finally:
                 self._websocket_started = False
 
         # If WebSocket is running, skip REST collection (WebSocket handles real-time)
-        if market_open and self._websocket_started:
+        if in_extended_hours and self._websocket_started:
             # WebSocket is handling real-time data, only do periodic REST for historical gaps
-            # Check if we should run REST collection (less frequently during market hours)
+            # Check if we should run REST collection (less frequently during extended hours)
             if not self._should_run_cycle():
                 return
 

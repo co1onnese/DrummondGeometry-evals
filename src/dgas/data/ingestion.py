@@ -9,7 +9,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable, List, Sequence
 
 from ..db import get_connection
-from .bar_aggregator import aggregate_bars
 from .client import EODHDClient, EODHDConfig
 from .quality import DataQualityReport, analyze_intervals
 from .repository import bulk_upsert_market_data, ensure_market_symbol, get_latest_timestamp
@@ -42,59 +41,109 @@ def _client_context(client: EODHDClient | None) -> Iterable[EODHDClient]:
         client.close()
 
 
+def _get_data_finalization_cutoff() -> datetime:
+    """
+    Get the cutoff time for when historical data is finalized.
+    
+    EODHD historical data is finalized 2-3 hours after market close (4pm ET).
+    We use 7pm ET (3 hours after close) as the safe cutoff.
+    
+    Returns:
+        Datetime representing when today's historical data becomes available
+    """
+    from zoneinfo import ZoneInfo
+    
+    et_tz = ZoneInfo("America/New_York")
+    now_et = datetime.now(timezone.utc).astimezone(et_tz)
+    
+    # Data finalized at 7pm ET (3 hours after 4pm market close)
+    return now_et.replace(hour=19, minute=0, second=0, microsecond=0)
+
+
+def _select_data_source(
+    target_date: datetime.date,
+    current_time: datetime,
+    finalization_cutoff: datetime
+) -> str:
+    """
+    Select the appropriate data source based on data recency.
+    
+    Decision tree:
+    1. Historical: For data >3 hours old (finalized)
+    2. Live: For today's data when historical not yet available
+    3. Skip: When data is too recent to be available
+    
+    Args:
+        target_date: Date we want data for
+        current_time: Current time (UTC)
+        finalization_cutoff: When historical data becomes available
+        
+    Returns:
+        "historical", "live", or "skip"
+    """
+    today = current_time.date()
+    
+    # For dates before today, always use historical
+    if target_date < today:
+        return "historical"
+    
+    # For today's data, check if historical is available
+    if target_date == today:
+        et_time = current_time.astimezone(finalization_cutoff.tzinfo)
+        if et_time >= finalization_cutoff:
+            # Past finalization window - historical available
+            return "historical"
+        else:
+            # Within delay window - use live endpoint
+            return "live"
+    
+    # Future date - no data available
+    return "skip"
+
+
 def backfill_intraday(
     symbol: str,
     *,
     exchange: str,
     start_date: str,
     end_date: str,
-    interval: str = "30m",
+    interval: str = "5m",
     client: EODHDClient | None = None,
     use_live_for_today: bool = True,
 ) -> IngestionSummary:
     """
     Fetch and persist intraday data for a symbol.
     
-    For dates up to yesterday: Uses historical intraday endpoint
-    For today: Uses live/realtime OHLCV endpoint (if use_live_for_today=True)
+    Uses a clear decision tree for endpoint selection:
+    - Historical endpoint: For finalized data (>3 hours after market close)
+    - Live endpoint: For today's data when historical not yet available
+    - WebSocket: Handled separately by collection service
     
     Args:
         symbol: Stock symbol
         exchange: Exchange code
         start_date: Start date (YYYY-MM-DD)
         end_date: End date (YYYY-MM-DD)
-        interval: Data interval
+        interval: Data interval (native API intervals: 1m, 5m, 1h)
         client: Optional EODHD client
-        use_live_for_today: If True, use live endpoint for today's data (default: True)
+        use_live_for_today: If True, use live endpoint for today's data
     """
-    from datetime import date as date_type
-    
     start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
     end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
     now = datetime.now(timezone.utc)
     today = now.date()
     
-    # EODHD API: Data is delayed 2-3 hours after market close
-    # Don't request today's data via historical endpoint if it's too recent
-    # Use yesterday as cutoff if we're within the delay window (assume 3 hours for safety)
-    from zoneinfo import ZoneInfo
-    et_tz = ZoneInfo("America/New_York")
-    now_et = now.astimezone(et_tz)
-    
-    # Market typically closes at 4:00 PM ET
-    # Add 3 hours delay = 7:00 PM ET
-    # If current time is before 7:00 PM ET on a trading day, data for today isn't finalized yet
-    market_close_et = now_et.replace(hour=16, minute=0, second=0, microsecond=0)  # 4:00 PM ET
-    data_available_et = market_close_et.replace(hour=19, minute=0)  # 7:00 PM ET (3 hours after close)
+    # Get finalization cutoff (7pm ET)
+    finalization_cutoff = _get_data_finalization_cutoff()
     
     # Determine latest date we can safely request via historical endpoint
-    if now_et.hour < 19 or (now_et.date() == today and now_et < data_available_et):
-        # Within delay window - use yesterday as latest safe date
-        latest_safe_date = today - timedelta(days=1)
-        LOGGER.info(f"{symbol}: Within API delay window, using {latest_safe_date} as latest safe date for historical endpoint")
-    else:
-        # Past delay window - today's data should be available
+    source = _select_data_source(today, now, finalization_cutoff)
+    if source == "historical":
         latest_safe_date = today
+    else:
+        # Historical not available for today yet
+        latest_safe_date = today - timedelta(days=1)
+        LOGGER.info(f"{symbol}: Historical data not finalized for today, using {latest_safe_date} as cutoff")
     
     all_bars: List[IntervalData] = []
     
@@ -126,19 +175,12 @@ def backfill_intraday(
         # Note: Live endpoint may work even if historical doesn't (due to delay)
         if end_dt >= today and use_live_for_today:
             try:
-                # Live endpoint: use 5m if requesting 30m (API only supports 1m, 5m, 1h)
-                live_interval = "5m" if interval == "30m" else interval
                 LOGGER.info(f"{symbol}: Attempting to fetch today's data via live endpoint (data may be delayed 2-3h after market close)...")
-                live_bars = api.fetch_live_ohlcv(symbol, interval=live_interval, exchange=exchange)
+                live_bars = api.fetch_live_ohlcv(symbol, interval=interval, exchange=exchange)
                 LOGGER.debug(f"{symbol}: API returned {len(live_bars) if live_bars else 0} live bars")
                 if live_bars:
                     # Filter to only today's bars
                     today_bars = [b for b in live_bars if b.timestamp.date() == today]
-                    
-                    # If we fetched 5m but need 30m, aggregate
-                    if interval == "30m" and today_bars:
-                        today_bars = aggregate_bars(today_bars, "30m")
-                        LOGGER.debug(f"{symbol}: Aggregated {len(live_bars)} live 5m bars to {len(today_bars)} 30m bars")
                     
                     all_bars.extend(today_bars)
                     LOGGER.info(f"{symbol}: Fetched {len(today_bars)} live bars for today")
@@ -152,12 +194,11 @@ def backfill_intraday(
                     # Past delay window - try historical as fallback
                     try:
                         LOGGER.info(f"{symbol}: Past delay window, trying historical endpoint for today as fallback...")
-                        # fetch_intraday handles 30m -> 5m conversion and aggregation automatically
                         today_bars = api.fetch_intraday(
                             symbol, 
                             start=today.isoformat(), 
                             end=today.isoformat(), 
-                            interval=interval,  # Client will convert 30m to 5m and aggregate
+                            interval=interval,
                             exchange=exchange
                         )
                         all_bars.extend(today_bars)
@@ -247,7 +288,7 @@ def incremental_update_intraday(
     symbol: str,
     *,
     exchange: str,
-    interval: str = "30m",
+    interval: str = "5m",
     buffer_days: int = 2,
     default_start: str | None = None,
     client: EODHDClient | None = None,
@@ -310,18 +351,10 @@ def incremental_update_intraday(
         if need_recent_data and use_live_data:
             try:
                 LOGGER.debug(f"{symbol}: Fetching live/realtime data")
-                # Live endpoint only supports 1m, 5m, 1h - use 5m if requesting 30m
-                live_interval = "5m" if interval == "30m" else interval
-                live_bars = api.fetch_live_ohlcv(symbol, interval=live_interval, exchange=exchange)
+                live_bars = api.fetch_live_ohlcv(symbol, interval=interval, exchange=exchange)
                 if live_bars:
                     # Filter to recent bars (today or yesterday) - live endpoint has latest available
                     recent_bars = [b for b in live_bars if b.timestamp.date() >= yesterday]
-                    
-                    # If we fetched 5m but need 30m, aggregate
-                    if interval == "30m" and recent_bars:
-                        from .bar_aggregator import aggregate_bars
-                        recent_bars = aggregate_bars(recent_bars, "30m")
-                        LOGGER.debug(f"{symbol}: Aggregated live bars to {len(recent_bars)} 30m bars")
                     
                     all_bars.extend(recent_bars)
                     total_fetched += len(recent_bars)

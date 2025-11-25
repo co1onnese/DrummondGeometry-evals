@@ -156,9 +156,9 @@ class EODHDWebSocketClient:
         import random
         
         state = self.connections[connection_id]
-        max_reconnect_attempts = 10  # Increased from 5
+        max_reconnect_attempts = 30  # Increased from 10 for better resilience
         base_reconnect_delay = 2.0  # Base delay in seconds
-        max_reconnect_delay = 60.0  # Maximum delay (1 minute)
+        max_reconnect_delay = 600.0  # Maximum delay (10 minutes, up from 60s)
 
         while self.running:
             try:
@@ -204,7 +204,7 @@ class EODHDWebSocketClient:
 
                     # Process messages with heartbeat monitoring
                     last_heartbeat = datetime.now(timezone.utc)
-                    heartbeat_timeout = 120.0  # 2 minutes without messages = dead connection
+                    heartbeat_timeout = 30.0  # 30 seconds without messages = dead connection (faster detection)
 
                     async for message in websocket:
                         try:

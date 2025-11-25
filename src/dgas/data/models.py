@@ -177,22 +177,57 @@ class IntervalData(BaseModel):
         symbol_override: str | None = None,
     ) -> List["IntervalData"]:
         """Parse list of API records, skipping records with invalid data."""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Convert to list to allow multiple iterations and get total count
+        records_list = list(records)
+        total_records = len(records_list)
+        
         result = []
         skipped = 0
-        for rec in records:
+        skipped_reasons = {}
+        
+        for rec in records_list:
             try:
                 result.append(cls.from_api_record(rec, interval, symbol_override=symbol_override))
             except ValueError as e:
                 # Skip records with missing/invalid OHLC data
                 skipped += 1
+                # Track reasons for skipping
+                error_msg = str(e)
+                if "missing required OHLC" in error_msg:
+                    # Extract which fields are missing
+                    if "open" in error_msg.lower():
+                        skipped_reasons["missing_open"] = skipped_reasons.get("missing_open", 0) + 1
+                    if "high" in error_msg.lower():
+                        skipped_reasons["missing_high"] = skipped_reasons.get("missing_high", 0) + 1
+                    if "low" in error_msg.lower():
+                        skipped_reasons["missing_low"] = skipped_reasons.get("missing_low", 0) + 1
+                    if "close" in error_msg.lower():
+                        skipped_reasons["missing_close"] = skipped_reasons.get("missing_close", 0) + 1
+                else:
+                    skipped_reasons["other"] = skipped_reasons.get("other", 0) + 1
+                
                 # Log at debug level to avoid spam, but track skipped records
-                import logging
-                logger = logging.getLogger(__name__)
                 logger.debug(f"Skipping invalid API record: {e}")
+        
         if skipped > 0:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning(f"Skipped {skipped} records with invalid OHLC data out of {len(list(records))} total")
+            skip_rate = (skipped / total_records * 100) if total_records > 0 else 0
+            # Only warn if skip rate is significant (>5%) or absolute count is high (>100)
+            if skip_rate > 5.0 or skipped > 100:
+                reason_summary = ", ".join([f"{k}: {v}" for k, v in skipped_reasons.items()])
+                logger.warning(
+                    f"Skipped {skipped} records with invalid OHLC data out of {total_records} total "
+                    f"({skip_rate:.1f}% skip rate). Reasons: {reason_summary if reason_summary else 'unknown'}"
+                )
+            else:
+                # Lower log level for small numbers of skipped records (likely market closure)
+                logger.debug(
+                    f"Skipped {skipped} records with invalid OHLC data out of {total_records} total "
+                    f"({skip_rate:.1f}% skip rate). This is normal for market closure periods."
+                )
+        
         return result
 
 
