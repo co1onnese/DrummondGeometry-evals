@@ -118,6 +118,7 @@ class MultiTimeframeStrategy(BaseStrategy):
             return None
 
         direction = TrendDirection.UP if position.side.name == "LONG" else TrendDirection.DOWN
+        exit_action = SignalAction.EXIT_LONG if direction == TrendDirection.UP else SignalAction.EXIT_SHORT
 
         trail_info = self._trail_state.get(context.symbol)
         trail_price = trail_info.get("trail") if trail_info else None
@@ -142,19 +143,29 @@ class MultiTimeframeStrategy(BaseStrategy):
             # LONG: exit if bar.low touched or went below trail_price
             if direction == TrendDirection.UP and context.bar.low <= trail_price:
                 self._trail_state.pop(context.symbol, None)
-                return Signal(SignalAction.EXIT_LONG)
+                return Signal(exit_action, metadata={"exit_reason": "trailing_stop"})
             # SHORT: exit if bar.high touched or went above trail_price
             if direction == TrendDirection.DOWN and context.bar.high >= trail_price:
                 self._trail_state.pop(context.symbol, None)
-                return Signal(SignalAction.EXIT_SHORT)
+                return Signal(exit_action, metadata={"exit_reason": "trailing_stop"})
+
+        # Check for exhaust pattern exit (Priority 2 enhancement)
+        if self._check_exhaust_exit(analysis, direction):
+            self._trail_state.pop(context.symbol, None)
+            return Signal(exit_action, metadata={"exit_reason": "exhaust_pattern"})
+
+        # Check for termination touch exit (Priority 2 enhancement)
+        if self._check_termination_exit(analysis, direction):
+            self._trail_state.pop(context.symbol, None)
+            return Signal(exit_action, metadata={"exit_reason": "termination_touch"})
 
         if float(analysis.alignment.alignment_score) < self.config.min_alignment:
             self._trail_state.pop(context.symbol, None)
-            return Signal(SignalAction.EXIT_LONG if direction == TrendDirection.UP else SignalAction.EXIT_SHORT)
+            return Signal(exit_action, metadata={"exit_reason": "low_alignment"})
 
         if analysis.recommended_action in {"reduce", "wait"} or analysis.risk_level == "high":
             self._trail_state.pop(context.symbol, None)
-            return Signal(SignalAction.EXIT_LONG if direction == TrendDirection.UP else SignalAction.EXIT_SHORT)
+            return Signal(exit_action, metadata={"exit_reason": "risk_management"})
 
         return None
 
@@ -197,11 +208,66 @@ class MultiTimeframeStrategy(BaseStrategy):
                 PatternType.PLDOT_PUSH,
                 PatternType.C_WAVE,
                 PatternType.PLDOT_REFRESH,
+                PatternType.TERMINATION_TOUCH,  # Price reached projected Drummond line
             }
             return directional_ok and strength_ok and type_ok
 
         return any(
             _pattern_matches(event)
+            for event in list(analysis.trading_tf_patterns) + list(analysis.htf_patterns)
+        )
+
+    def _check_exhaust_exit(
+        self, 
+        analysis: MultiTimeframeAnalysis, 
+        direction: TrendDirection
+    ) -> bool:
+        """
+        Check if exhaust pattern indicates exit from current position.
+        
+        For LONG position (direction=UP): bearish exhaust (direction=-1) signals exit
+        For SHORT position (direction=DOWN): bullish exhaust (direction=1) signals exit
+        """
+        # Determine which exhaust direction would trigger exit
+        exit_direction = -1 if direction == TrendDirection.UP else 1
+        
+        def is_exit_exhaust(event: PatternEvent) -> bool:
+            return (
+                event.pattern_type == PatternType.EXHAUST
+                and event.direction == exit_direction
+                and event.strength >= self.config.required_pattern_strength
+            )
+        
+        # Check both timeframes for exhaust patterns
+        return any(
+            is_exit_exhaust(event)
+            for event in list(analysis.trading_tf_patterns) + list(analysis.htf_patterns)
+        )
+
+    def _check_termination_exit(
+        self, 
+        analysis: MultiTimeframeAnalysis, 
+        direction: TrendDirection
+    ) -> bool:
+        """
+        Check if termination touch at key level suggests exit.
+        
+        For LONG position: termination touch with bearish direction signals exit
+        For SHORT position: termination touch with bullish direction signals exit
+        """
+        # Determine which termination direction would trigger exit
+        exit_direction = -1 if direction == TrendDirection.UP else 1
+        
+        def is_exit_termination(event: PatternEvent) -> bool:
+            return (
+                event.pattern_type == PatternType.TERMINATION_TOUCH
+                and event.direction == exit_direction
+                and event.strength >= self.config.required_pattern_strength
+            )
+        
+        # Check both timeframes for termination patterns
+        return any(
+            is_exit_termination(event)
             for event in list(analysis.trading_tf_patterns) + list(analysis.htf_patterns)
         )
 

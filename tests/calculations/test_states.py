@@ -326,3 +326,302 @@ def test_state_change_reasons():
     state_changes = [s for s in states if s.state_change_reason is not None]
     assert len(state_changes) > 0
     assert all(isinstance(s.state_change_reason, str) for s in state_changes)
+
+
+# ============================================================================
+# Priority 3: Congestion State Tracking Tests
+# These tests verify the new trend_at_congestion_entrance and bars_in_congestion
+# fields that ensure accurate exit vs. reversal classification.
+# ============================================================================
+
+
+def test_trend_at_congestion_entrance_is_captured():
+    """Test that trend direction is captured when entering congestion from a trend."""
+    classifier = MarketStateClassifier()
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    bars = []
+    series = []
+    
+    # First 3 bars: establish uptrend (all closes above PLdot)
+    for i in range(3):
+        ts = base + timedelta(minutes=30 * i)
+        bar, pl = _make_bar(ts, close=15 + i, value=10 + i * 0.5)  # Close > PLdot
+        bars.append(bar)
+        series.append(pl)
+
+    # Bar 4: congestion entrance (first close below PLdot after uptrend)
+    ts = base + timedelta(minutes=90)
+    bar, pl = _make_bar(ts, close=10, value=12)  # Close < PLdot
+    bars.append(bar)
+    series.append(pl)
+
+    states = classifier.classify(bars, series)
+
+    # Find the congestion entrance state
+    congestion_entrance = [s for s in states if s.state == MarketState.CONGESTION_ENTRANCE]
+    assert len(congestion_entrance) > 0, "Should detect congestion entrance"
+    
+    # The trend_at_congestion_entrance should be UP (the trend before entering congestion)
+    assert congestion_entrance[0].trend_at_congestion_entrance == TrendDirection.UP
+    assert congestion_entrance[0].bars_in_congestion == 1
+
+
+def test_trend_at_congestion_entrance_preserved_through_extended_congestion():
+    """Test that trend direction is preserved through many bars of congestion."""
+    classifier = MarketStateClassifier()
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    bars = []
+    series = []
+    
+    # First 3 bars: establish uptrend
+    for i in range(3):
+        ts = base + timedelta(minutes=30 * i)
+        bar, pl = _make_bar(ts, close=15 + i, value=10 + i * 0.5)
+        bars.append(bar)
+        series.append(pl)
+
+    # Next 10 bars: extended congestion (alternating above/below PLdot)
+    for i in range(10):
+        ts = base + timedelta(minutes=90 + 30 * i)
+        # Alternate above and below PLdot
+        close = 13 if i % 2 == 0 else 9
+        bar, pl = _make_bar(ts, close=close, value=11)
+        bars.append(bar)
+        series.append(pl)
+
+    states = classifier.classify(bars, series)
+
+    # Find congestion states that have trend_at_congestion_entrance set
+    # (i.e., "real" congestion that follows a confirmed trend, not early indeterminate states)
+    congestion_states_with_tracking = [
+        s for s in states 
+        if s.state in [MarketState.CONGESTION_ENTRANCE, MarketState.CONGESTION_ACTION]
+        and s.trend_at_congestion_entrance is not None
+    ]
+    
+    assert len(congestion_states_with_tracking) >= 5, \
+        f"Should have multiple tracked congestion states, got {len(congestion_states_with_tracking)}"
+    
+    # All tracked congestion states should preserve the original uptrend direction
+    for state in congestion_states_with_tracking:
+        assert state.trend_at_congestion_entrance == TrendDirection.UP, \
+            f"trend_at_congestion_entrance should be UP throughout congestion, got {state.trend_at_congestion_entrance}"
+    
+    # bars_in_congestion should increment
+    last_congestion = congestion_states_with_tracking[-1]
+    assert last_congestion.bars_in_congestion > 5, \
+        f"bars_in_congestion should be > 5 after extended congestion, got {last_congestion.bars_in_congestion}"
+
+
+def test_congestion_exit_uses_preserved_trend():
+    """Test that congestion exit is correctly identified when resuming original trend."""
+    classifier = MarketStateClassifier()
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    bars = []
+    series = []
+    
+    # First 3 bars: establish uptrend
+    for i in range(3):
+        ts = base + timedelta(minutes=30 * i)
+        bar, pl = _make_bar(ts, close=15 + i, value=10 + i * 0.5)
+        bars.append(bar)
+        series.append(pl)
+
+    # Extended congestion (8 bars alternating)
+    for i in range(8):
+        ts = base + timedelta(minutes=90 + 30 * i)
+        close = 13 if i % 2 == 0 else 9
+        bar, pl = _make_bar(ts, close=close, value=11)
+        bars.append(bar)
+        series.append(pl)
+
+    # Exit congestion with 3 bars above PLdot (same as original trend)
+    for i in range(3):
+        ts = base + timedelta(minutes=330 + 30 * i)
+        bar, pl = _make_bar(ts, close=14 + i, value=11 + i * 0.3)
+        bars.append(bar)
+        series.append(pl)
+
+    states = classifier.classify(bars, series)
+
+    # Should detect CONGESTION_EXIT (not TREND or REVERSAL)
+    congestion_exits = [s for s in states if s.state == MarketState.CONGESTION_EXIT]
+    assert len(congestion_exits) > 0, \
+        f"Should detect CONGESTION_EXIT when resuming original uptrend. States: {[s.state for s in states[-5:]]}"
+    
+    # Exit should be in UP direction
+    assert congestion_exits[0].trend_direction == TrendDirection.UP
+
+
+def test_reversal_uses_preserved_trend():
+    """Test that reversal is correctly identified when exiting congestion opposite to original trend."""
+    classifier = MarketStateClassifier()
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    bars = []
+    series = []
+    
+    # First 3 bars: establish uptrend
+    for i in range(3):
+        ts = base + timedelta(minutes=30 * i)
+        bar, pl = _make_bar(ts, close=15 + i, value=10 + i * 0.5)
+        bars.append(bar)
+        series.append(pl)
+
+    # Extended congestion (8 bars alternating)
+    for i in range(8):
+        ts = base + timedelta(minutes=90 + 30 * i)
+        close = 13 if i % 2 == 0 else 9
+        bar, pl = _make_bar(ts, close=close, value=11)
+        bars.append(bar)
+        series.append(pl)
+
+    # Exit congestion with 3 bars BELOW PLdot (opposite to original uptrend = REVERSAL)
+    for i in range(3):
+        ts = base + timedelta(minutes=330 + 30 * i)
+        bar, pl = _make_bar(ts, close=8 - i, value=11 - i * 0.3)  # Close < PLdot
+        bars.append(bar)
+        series.append(pl)
+
+    states = classifier.classify(bars, series)
+
+    # Should detect REVERSAL (not TREND or CONGESTION_EXIT)
+    reversals = [s for s in states if s.state == MarketState.REVERSAL]
+    assert len(reversals) > 0, \
+        f"Should detect REVERSAL when exiting congestion opposite to original uptrend. States: {[s.state for s in states[-5:]]}"
+    
+    # Reversal should be in DOWN direction
+    assert reversals[0].trend_direction == TrendDirection.DOWN
+
+
+def test_bars_in_congestion_increments_correctly():
+    """Test that bars_in_congestion counter increments correctly."""
+    classifier = MarketStateClassifier()
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    bars = []
+    series = []
+    
+    # First 3 bars: establish uptrend
+    for i in range(3):
+        ts = base + timedelta(minutes=30 * i)
+        bar, pl = _make_bar(ts, close=15 + i, value=10 + i * 0.5)
+        bars.append(bar)
+        series.append(pl)
+
+    # 5 bars of congestion
+    for i in range(5):
+        ts = base + timedelta(minutes=90 + 30 * i)
+        close = 13 if i % 2 == 0 else 9
+        bar, pl = _make_bar(ts, close=close, value=11)
+        bars.append(bar)
+        series.append(pl)
+
+    states = classifier.classify(bars, series)
+
+    # Find congestion states that have tracking enabled (after a confirmed trend)
+    congestion_states = [
+        s for s in states 
+        if s.state in [MarketState.CONGESTION_ENTRANCE, MarketState.CONGESTION_ACTION]
+        and s.trend_at_congestion_entrance is not None
+    ]
+    
+    # bars_in_congestion should increment: 1, 2, 3, 4, 5
+    expected_counts = list(range(1, len(congestion_states) + 1))
+    actual_counts = [s.bars_in_congestion for s in congestion_states]
+    
+    assert actual_counts == expected_counts, \
+        f"bars_in_congestion should increment sequentially. Expected {expected_counts}, got {actual_counts}"
+
+
+def test_congestion_tracking_resets_after_trend():
+    """Test that congestion tracking resets when entering a new trend."""
+    classifier = MarketStateClassifier()
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    bars = []
+    series = []
+    
+    # First 3 bars: uptrend
+    for i in range(3):
+        ts = base + timedelta(minutes=30 * i)
+        bar, pl = _make_bar(ts, close=15 + i, value=10 + i * 0.5)
+        bars.append(bar)
+        series.append(pl)
+
+    # 3 bars congestion
+    for i in range(3):
+        ts = base + timedelta(minutes=90 + 30 * i)
+        close = 13 if i % 2 == 0 else 9
+        bar, pl = _make_bar(ts, close=close, value=11)
+        bars.append(bar)
+        series.append(pl)
+
+    # Exit to uptrend (3 bars)
+    for i in range(3):
+        ts = base + timedelta(minutes=180 + 30 * i)
+        bar, pl = _make_bar(ts, close=14 + i, value=11 + i * 0.3)
+        bars.append(bar)
+        series.append(pl)
+
+    # Continue in trend (3 more bars)
+    for i in range(3):
+        ts = base + timedelta(minutes=270 + 30 * i)
+        bar, pl = _make_bar(ts, close=17 + i, value=13 + i * 0.3)
+        bars.append(bar)
+        series.append(pl)
+
+    states = classifier.classify(bars, series)
+
+    # Find trend states after congestion exit
+    trend_states = [s for s in states if s.state == MarketState.TREND]
+    
+    # Trend states should have reset congestion tracking
+    for state in trend_states[-3:]:  # Last few trend states
+        assert state.trend_at_congestion_entrance is None, \
+            "trend_at_congestion_entrance should be None during trend"
+        assert state.bars_in_congestion == 0, \
+            "bars_in_congestion should be 0 during trend"
+
+
+def test_downtrend_congestion_tracking():
+    """Test congestion tracking works correctly for downtrends too."""
+    classifier = MarketStateClassifier()
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    bars = []
+    series = []
+    
+    # First 3 bars: establish downtrend (all closes below PLdot)
+    for i in range(3):
+        ts = base + timedelta(minutes=30 * i)
+        bar, pl = _make_bar(ts, close=8 - i, value=12 - i * 0.3)  # Close < PLdot
+        bars.append(bar)
+        series.append(pl)
+
+    # Extended congestion (6 bars)
+    for i in range(6):
+        ts = base + timedelta(minutes=90 + 30 * i)
+        close = 13 if i % 2 == 0 else 9
+        bar, pl = _make_bar(ts, close=close, value=11)
+        bars.append(bar)
+        series.append(pl)
+
+    states = classifier.classify(bars, series)
+
+    # Find congestion states that have tracking enabled (after a confirmed trend)
+    congestion_states = [
+        s for s in states 
+        if s.state in [MarketState.CONGESTION_ENTRANCE, MarketState.CONGESTION_ACTION]
+        and s.trend_at_congestion_entrance is not None
+    ]
+    
+    assert len(congestion_states) > 0, "Should have tracked congestion states after downtrend"
+    
+    # Should preserve downtrend direction
+    for state in congestion_states:
+        assert state.trend_at_congestion_entrance == TrendDirection.DOWN, \
+            f"trend_at_congestion_entrance should be DOWN for congestion after downtrend, got {state.trend_at_congestion_entrance}"

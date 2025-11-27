@@ -11,6 +11,7 @@ from typing import Callable, List, Sequence
 
 from .envelopes import EnvelopeSeries
 from .pldot import PLDotSeries
+from .drummond_lines import DrummondZone
 from ..data.models import IntervalData
 
 
@@ -20,6 +21,9 @@ class PatternType(Enum):
     EXHAUST = "exhaust"
     C_WAVE = "c_wave"
     CONGESTION_OSCILLATION = "congestion_oscillation"
+    # NEW: Termination patterns for Drummond line projected levels
+    TERMINATION_APPROACH = "termination_approach"
+    TERMINATION_TOUCH = "termination_touch"
 
 
 @dataclass(frozen=True)
@@ -62,6 +66,26 @@ class CWaveConfig:
     require_volume_confirmation: bool = False
     volume_multiplier: float = 1.2
     volume_lookback: int = 3
+
+
+@dataclass(frozen=True)
+class TerminationConfig:
+    """Configuration for Drummond line termination detection.
+    
+    Drummond Geometry projects two-bar trendlines forward to identify
+    "termination points" where price energy is expected to exhaust.
+    This config controls how we detect when price approaches these levels.
+    """
+    # Percentage threshold for "approach" (within X% of projected level)
+    approach_threshold_pct: float = 0.5
+    # Percentage threshold for "touch" (within X% = considered a touch)
+    touch_threshold_pct: float = 0.15
+    # Minimum number of lines in a zone to consider it significant
+    min_zone_strength: int = 2
+    # Whether to require momentum fade when approaching termination
+    require_momentum_fade: bool = False
+    # Minimum slope change ratio to consider momentum fading (0.0 = any decrease)
+    momentum_fade_threshold: float = 0.0
 
 
 def detect_pldot_push(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries]) -> List[PatternEvent]:
@@ -452,6 +476,140 @@ def detect_congestion_oscillation(envelopes: Sequence[EnvelopeSeries]) -> List[P
     return events
 
 
+def detect_termination_events(
+    intervals: Sequence[IntervalData],
+    zones: Sequence[DrummondZone],
+    pldot: Sequence[PLDotSeries] | None = None,
+    config: TerminationConfig | None = None,
+) -> List[PatternEvent]:
+    """
+    Detect when price approaches or touches projected Drummond line termination zones.
+    
+    Drummond Geometry projects two-bar trendlines forward to identify "termination points"
+    where price energy is expected to exhaust. This function detects when price approaches
+    these projected levels, which often precede reversals or significant reactions.
+    
+    Args:
+        intervals: Price bar data
+        zones: Aggregated Drummond line zones (from aggregate_zones)
+        pldot: Optional PLDot series for momentum fade detection
+        config: Configuration for detection thresholds
+        
+    Returns:
+        List of PatternEvent for TERMINATION_APPROACH and TERMINATION_TOUCH patterns
+    """
+    cfg = config or TerminationConfig()
+    
+    if not intervals or not zones:
+        return []
+    
+    # Filter zones by minimum strength
+    significant_zones = [z for z in zones if z.strength >= cfg.min_zone_strength]
+    if not significant_zones:
+        return []
+    
+    # Build slope map for momentum fade detection
+    slope_map: dict[datetime, Decimal] = {}
+    if pldot:
+        slope_map = {series.timestamp: series.slope for series in pldot}
+    
+    ordered_bars = sorted(intervals, key=lambda bar: bar.timestamp)
+    events: List[PatternEvent] = []
+    
+    # Track active approaches to avoid duplicate events
+    active_approaches: dict[tuple[str, float], datetime] = {}  # (zone_type, center_price) -> start_timestamp
+    
+    for i, bar in enumerate(ordered_bars):
+        close_f = float(bar.close)
+        high_f = float(bar.high)
+        low_f = float(bar.low)
+        
+        for zone in significant_zones:
+            zone_center = float(zone.center_price)
+            zone_upper = float(zone.upper_price)
+            zone_lower = float(zone.lower_price)
+            zone_width = zone_upper - zone_lower if zone_upper > zone_lower else 0.01
+            
+            # Calculate approach threshold based on zone center
+            approach_dist = abs(zone_center) * (cfg.approach_threshold_pct / 100.0)
+            touch_dist = abs(zone_center) * (cfg.touch_threshold_pct / 100.0)
+            
+            # Ensure minimum thresholds for low-priced instruments
+            approach_dist = max(approach_dist, zone_width * 2)
+            touch_dist = max(touch_dist, zone_width * 0.5)
+            
+            zone_key = (zone.line_type, zone_center)
+            
+            # Check if price is approaching or touching the zone
+            # For resistance zones: price approaching from below
+            # For support zones: price approaching from above
+            
+            if zone.line_type == "resistance":
+                # Price approaching resistance from below
+                distance_to_zone = zone_lower - high_f
+                is_approaching = 0 < distance_to_zone <= approach_dist
+                is_touching = high_f >= zone_lower - touch_dist and high_f <= zone_upper + touch_dist
+                direction = 1  # Bullish approach to resistance (potential reversal down)
+                
+            else:  # support
+                # Price approaching support from above
+                distance_to_zone = low_f - zone_upper
+                is_approaching = 0 < distance_to_zone <= approach_dist
+                is_touching = low_f <= zone_upper + touch_dist and low_f >= zone_lower - touch_dist
+                direction = -1  # Bearish approach to support (potential reversal up)
+            
+            # Check momentum fade if required
+            momentum_ok = True
+            if cfg.require_momentum_fade and slope_map and i > 0:
+                current_slope = slope_map.get(bar.timestamp)
+                prev_slope = slope_map.get(ordered_bars[i-1].timestamp)
+                
+                if current_slope is not None and prev_slope is not None:
+                    slope_change = float(current_slope) - float(prev_slope)
+                    # For resistance approach (bullish), momentum should be fading (slope decreasing)
+                    # For support approach (bearish), momentum should be fading (slope increasing/less negative)
+                    if direction == 1:  # Approaching resistance
+                        momentum_ok = slope_change <= cfg.momentum_fade_threshold
+                    else:  # Approaching support
+                        momentum_ok = slope_change >= -cfg.momentum_fade_threshold
+            
+            if not momentum_ok:
+                continue
+            
+            # Generate events
+            if is_touching:
+                # TERMINATION_TOUCH - price has reached the zone
+                # Clear any active approach for this zone
+                if zone_key in active_approaches:
+                    del active_approaches[zone_key]
+                
+                events.append(PatternEvent(
+                    pattern_type=PatternType.TERMINATION_TOUCH,
+                    direction=-direction,  # Reversal direction (opposite to approach)
+                    start_timestamp=bar.timestamp,
+                    end_timestamp=bar.timestamp,
+                    strength=zone.strength,
+                ))
+                
+            elif is_approaching:
+                # TERMINATION_APPROACH - price is getting close
+                if zone_key not in active_approaches:
+                    active_approaches[zone_key] = bar.timestamp
+                    events.append(PatternEvent(
+                        pattern_type=PatternType.TERMINATION_APPROACH,
+                        direction=direction,  # Direction of approach
+                        start_timestamp=bar.timestamp,
+                        end_timestamp=bar.timestamp,
+                        strength=zone.strength,
+                    ))
+            else:
+                # Price moved away - clear active approach
+                if zone_key in active_approaches:
+                    del active_approaches[zone_key]
+    
+    return events
+
+
 def _build_event(pattern_type: PatternType, streak: List[PLDotSeries], direction: int) -> PatternEvent:
     return PatternEvent(
         pattern_type=pattern_type,
@@ -494,9 +652,11 @@ __all__ = [
     "PLDotRefreshConfig",
     "ExhaustConfig",
     "CWaveConfig",
+    "TerminationConfig",
     "detect_pldot_push",
     "detect_pldot_refresh",
     "detect_exhaust",
     "detect_c_wave",
     "detect_congestion_oscillation",
+    "detect_termination_events",
 ]

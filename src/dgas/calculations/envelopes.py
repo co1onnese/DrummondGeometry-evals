@@ -33,14 +33,26 @@ class EnvelopeCalculator:
     expected energy range. This forward-looking approach preserves the
     methodology's emphasis on probabilities rather than fixed-width bands.
 
-    Alternate methods (``atr`` and ``percentage``) remain available for
-    comparison and legacy support, but the recommended configuration is
-    ``pldot_range`` with a three-bar window and 1.5x multiplier.
+    Available methods:
+    - ``pldot_range``: 3-period standard deviation of PLdot values (default)
+    - ``hlc_range``: 3-period high-low range of the bars that form PLdot
+    - ``atr``: Average True Range based envelope (legacy)
+    - ``percentage``: Fixed percentage envelope (legacy)
+
+    The ``hlc_range`` method provides an alternative that uses the actual
+    price range of the 3-bar period forming the PLdot, rather than statistical
+    volatility. This can be useful for comparison and validation against the
+    standard ``pldot_range`` method.
+
+    Recommended configuration is ``pldot_range`` with a three-bar window and
+    1.5x multiplier.
     """
 
+    VALID_METHODS = {"atr", "percentage", "pldot_range", "hlc_range"}
+
     def __init__(self, method: str = "pldot_range", period: int = 3, multiplier: float = 1.5, percent: float = 0.02) -> None:
-        if method not in {"atr", "percentage", "pldot_range"}:
-            raise ValueError("method must be 'atr', 'percentage', or 'pldot_range'")
+        if method not in self.VALID_METHODS:
+            raise ValueError(f"method must be one of {self.VALID_METHODS}")
         if period <= 0:
             raise ValueError("period must be positive")
         if multiplier <= 0:
@@ -87,6 +99,23 @@ class EnvelopeCalculator:
                 min_periods=self.period
             ).std()
             offset = pldot_volatility * self.multiplier
+
+        elif self.method == "hlc_range":
+            # HLC RANGE METHOD: Uses the 3-bar high-low range
+            # Alternative Drummond envelope calculation using price range
+            # instead of PLdot volatility. Some practitioners prefer this
+            # as it directly measures the price excursion of the PLdot period.
+            rolling_high = df["high"].rolling(
+                window=self.period,
+                min_periods=self.period
+            ).max()
+            rolling_low = df["low"].rolling(
+                window=self.period,
+                min_periods=self.period
+            ).min()
+            hlc_range = rolling_high - rolling_low
+            # Use half the range as offset (so total width = range * multiplier)
+            offset = (hlc_range / 2) * self.multiplier
 
         elif self.method == "atr":
             # LEGACY ATR METHOD: For comparison only

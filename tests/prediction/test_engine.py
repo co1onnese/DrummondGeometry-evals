@@ -247,6 +247,498 @@ class TestSignalGenerator:
         assert abs(signal.risk_reward_ratio - 2.0) < 0.1
 
 
+class TestExitSignalGeneration:
+    """Test exit signal generation from SignalGenerator."""
+
+    def test_generate_exit_signal_on_exhaust_pattern_long(self, sample_long_analysis, sample_timeframe_data):
+        """Test exit signal generated when exhaust pattern detected against LONG position."""
+        coordinator = MultiTimeframeCoordinator("4h", "1h")
+        generator = SignalGenerator(coordinator)
+
+        # Add bearish exhaust pattern to analysis (signals exit from long)
+        now = datetime.now(timezone.utc)
+        exhaust_pattern = PatternEvent(
+            pattern_type=PatternType.EXHAUST,
+            direction=-1,  # Bearish exhaust
+            start_timestamp=now - timedelta(hours=2),
+            end_timestamp=now,
+            strength=3,
+        )
+        
+        modified_analysis = replace(
+            sample_long_analysis,
+            trading_tf_patterns=[exhaust_pattern],
+        )
+
+        def mock_analyze(htf_data, trading_tf_data, ltf_data=None):
+            return modified_analysis
+
+        coordinator.analyze = mock_analyze
+
+        htf_data, trading_data = sample_timeframe_data
+        signals = generator.generate_exit_signals(
+            "AAPL", htf_data, trading_data, SignalType.LONG
+        )
+
+        assert len(signals) == 1
+        signal = signals[0]
+        assert signal.signal_type == SignalType.EXIT_LONG
+        assert "exhaust_pattern" in signal.pattern_context.get("exit_reasons", [])
+
+    def test_generate_exit_signal_on_exhaust_pattern_short(self, sample_short_analysis, sample_timeframe_data):
+        """Test exit signal generated when exhaust pattern detected against SHORT position."""
+        coordinator = MultiTimeframeCoordinator("4h", "1h")
+        generator = SignalGenerator(coordinator)
+
+        # Add bullish exhaust pattern to analysis (signals exit from short)
+        now = datetime.now(timezone.utc)
+        exhaust_pattern = PatternEvent(
+            pattern_type=PatternType.EXHAUST,
+            direction=1,  # Bullish exhaust
+            start_timestamp=now - timedelta(hours=2),
+            end_timestamp=now,
+            strength=3,
+        )
+        
+        modified_analysis = replace(
+            sample_short_analysis,
+            trading_tf_patterns=[exhaust_pattern],
+        )
+
+        def mock_analyze(htf_data, trading_tf_data, ltf_data=None):
+            return modified_analysis
+
+        coordinator.analyze = mock_analyze
+
+        htf_data, trading_data = sample_timeframe_data
+        signals = generator.generate_exit_signals(
+            "AAPL", htf_data, trading_data, SignalType.SHORT
+        )
+
+        assert len(signals) == 1
+        signal = signals[0]
+        assert signal.signal_type == SignalType.EXIT_SHORT
+        assert "exhaust_pattern" in signal.pattern_context.get("exit_reasons", [])
+
+    def test_generate_exit_signal_on_htf_trend_reversal(self, sample_long_analysis, sample_timeframe_data):
+        """Test exit signal generated when HTF trend reverses against position."""
+        coordinator = MultiTimeframeCoordinator("4h", "1h")
+        generator = SignalGenerator(coordinator)
+
+        # Modify analysis to have HTF trend DOWN (against LONG position)
+        modified_analysis = replace(
+            sample_long_analysis,
+            htf_trend=TrendDirection.DOWN,
+            htf_patterns=[],  # Clear patterns to isolate HTF reversal test
+            trading_tf_patterns=[],
+        )
+
+        def mock_analyze(htf_data, trading_tf_data, ltf_data=None):
+            return modified_analysis
+
+        coordinator.analyze = mock_analyze
+
+        htf_data, trading_data = sample_timeframe_data
+        signals = generator.generate_exit_signals(
+            "AAPL", htf_data, trading_data, SignalType.LONG
+        )
+
+        assert len(signals) == 1
+        signal = signals[0]
+        assert signal.signal_type == SignalType.EXIT_LONG
+        assert "htf_trend_reversal" in signal.pattern_context.get("exit_reasons", [])
+
+    def test_generate_exit_signal_on_termination_touch(self, sample_long_analysis, sample_timeframe_data):
+        """Test exit signal generated when termination touch detected against position."""
+        coordinator = MultiTimeframeCoordinator("4h", "1h")
+        generator = SignalGenerator(coordinator)
+
+        # Add bearish termination touch pattern (signals exit from long)
+        now = datetime.now(timezone.utc)
+        termination_pattern = PatternEvent(
+            pattern_type=PatternType.TERMINATION_TOUCH,
+            direction=-1,  # Bearish termination
+            start_timestamp=now - timedelta(hours=1),
+            end_timestamp=now,
+            strength=3,
+        )
+        
+        modified_analysis = replace(
+            sample_long_analysis,
+            htf_trend=TrendDirection.UP,  # Keep HTF trend aligned to isolate termination test
+            htf_patterns=[],
+            trading_tf_patterns=[termination_pattern],
+        )
+
+        def mock_analyze(htf_data, trading_tf_data, ltf_data=None):
+            return modified_analysis
+
+        coordinator.analyze = mock_analyze
+
+        htf_data, trading_data = sample_timeframe_data
+        signals = generator.generate_exit_signals(
+            "AAPL", htf_data, trading_data, SignalType.LONG
+        )
+
+        assert len(signals) == 1
+        signal = signals[0]
+        assert signal.signal_type == SignalType.EXIT_LONG
+        assert "termination_touch" in signal.pattern_context.get("exit_reasons", [])
+
+    def test_no_exit_signal_when_conditions_not_met(self, sample_long_analysis, sample_timeframe_data):
+        """Test no exit signal when no exit conditions are met."""
+        coordinator = MultiTimeframeCoordinator("4h", "1h")
+        generator = SignalGenerator(coordinator)
+
+        # Use sample_long_analysis which has HTF trend UP and no exit patterns
+        # Clear patterns to ensure no exit conditions
+        modified_analysis = replace(
+            sample_long_analysis,
+            htf_trend=TrendDirection.UP,
+            htf_patterns=[],
+            trading_tf_patterns=[],
+        )
+
+        def mock_analyze(htf_data, trading_tf_data, ltf_data=None):
+            return modified_analysis
+
+        coordinator.analyze = mock_analyze
+
+        htf_data, trading_data = sample_timeframe_data
+        signals = generator.generate_exit_signals(
+            "AAPL", htf_data, trading_data, SignalType.LONG
+        )
+
+        assert len(signals) == 0
+
+    def test_generate_exit_signal_invalid_position_type(self, sample_long_analysis, sample_timeframe_data):
+        """Test that invalid position type returns empty list."""
+        coordinator = MultiTimeframeCoordinator("4h", "1h")
+        generator = SignalGenerator(coordinator)
+
+        def mock_analyze(htf_data, trading_tf_data, ltf_data=None):
+            return sample_long_analysis
+
+        coordinator.analyze = mock_analyze
+
+        htf_data, trading_data = sample_timeframe_data
+        
+        # Try with EXIT_LONG which is not a valid position type
+        signals = generator.generate_exit_signals(
+            "AAPL", htf_data, trading_data, SignalType.EXIT_LONG
+        )
+
+        assert len(signals) == 0
+
+    def test_exit_signal_multiple_reasons(self, sample_long_analysis, sample_timeframe_data):
+        """Test exit signal with multiple exit reasons."""
+        coordinator = MultiTimeframeCoordinator("4h", "1h")
+        generator = SignalGenerator(coordinator)
+
+        # Add both exhaust and termination patterns, plus HTF reversal
+        now = datetime.now(timezone.utc)
+        exhaust_pattern = PatternEvent(
+            pattern_type=PatternType.EXHAUST,
+            direction=-1,
+            start_timestamp=now - timedelta(hours=2),
+            end_timestamp=now,
+            strength=3,
+        )
+        termination_pattern = PatternEvent(
+            pattern_type=PatternType.TERMINATION_TOUCH,
+            direction=-1,
+            start_timestamp=now - timedelta(hours=1),
+            end_timestamp=now,
+            strength=3,
+        )
+        
+        modified_analysis = replace(
+            sample_long_analysis,
+            htf_trend=TrendDirection.DOWN,  # HTF reversal
+            htf_patterns=[exhaust_pattern],
+            trading_tf_patterns=[termination_pattern],
+        )
+
+        def mock_analyze(htf_data, trading_tf_data, ltf_data=None):
+            return modified_analysis
+
+        coordinator.analyze = mock_analyze
+
+        htf_data, trading_data = sample_timeframe_data
+        signals = generator.generate_exit_signals(
+            "AAPL", htf_data, trading_data, SignalType.LONG
+        )
+
+        assert len(signals) == 1
+        signal = signals[0]
+        exit_reasons = signal.pattern_context.get("exit_reasons", [])
+        
+        # Should have multiple exit reasons
+        assert len(exit_reasons) >= 2
+        assert "htf_trend_reversal" in exit_reasons
+
+
+class TestTieredSignalGeneration:
+    """Test tiered signal generation from SignalGenerator."""
+
+    def test_generate_high_tier_signal(self, sample_long_analysis, sample_timeframe_data):
+        """Test HIGH tier signal generation with full requirements."""
+        from dgas.prediction.engine import TieredSignalConfig, SignalTier
+        
+        coordinator = MultiTimeframeCoordinator("4h", "1h")
+        tiered_config = TieredSignalConfig()
+        generator = SignalGenerator(coordinator, tiered_config=tiered_config)
+
+        # Modify analysis to meet HIGH tier criteria
+        modified_analysis = replace(
+            sample_long_analysis,
+            alignment=replace(
+                sample_long_analysis.alignment,
+                alignment_score=Decimal("0.75"),  # Above HIGH threshold (0.7)
+            ),
+            signal_strength=Decimal("0.70"),  # Above HIGH threshold (0.65)
+            confluence_zones=[
+                replace(
+                    sample_long_analysis.confluence_zones[0],
+                    weighted_strength=Decimal("3.2"),  # Above HIGH threshold (3.0)
+                )
+            ],
+        )
+
+        def mock_analyze(htf_data, trading_tf_data, ltf_data=None):
+            return modified_analysis
+
+        coordinator.analyze = mock_analyze
+
+        htf_data, trading_data = sample_timeframe_data
+        signals = generator.generate_tiered_signals("AAPL", htf_data, trading_data)
+
+        assert len(signals) == 1
+        signal = signals[0]
+        assert signal.tier == SignalTier.HIGH
+        assert signal.position_size_multiplier == 1.0
+        assert signal.signal_type == SignalType.LONG
+
+    def test_generate_medium_tier_signal(self, sample_long_analysis, sample_timeframe_data):
+        """Test MEDIUM tier signal generation without pattern requirement."""
+        from dgas.prediction.engine import TieredSignalConfig, SignalTier
+        
+        coordinator = MultiTimeframeCoordinator("4h", "1h")
+        tiered_config = TieredSignalConfig()
+        generator = SignalGenerator(coordinator, tiered_config=tiered_config)
+
+        # Modify analysis to meet MEDIUM but not HIGH tier criteria
+        # MEDIUM: alignment >= 0.6, strength >= 0.5, zone >= 2.5, no pattern required
+        # HIGH: alignment >= 0.7, strength >= 0.65, zone >= 3.0, pattern required
+        modified_analysis = replace(
+            sample_long_analysis,
+            alignment=replace(
+                sample_long_analysis.alignment,
+                alignment_score=Decimal("0.65"),  # Between MEDIUM (0.6) and HIGH (0.7)
+            ),
+            signal_strength=Decimal("0.55"),  # Between MEDIUM (0.5) and HIGH (0.65)
+            confluence_zones=[
+                replace(
+                    sample_long_analysis.confluence_zones[0],
+                    weighted_strength=Decimal("2.7"),  # Between MEDIUM (2.5) and HIGH (3.0)
+                )
+            ],
+            htf_patterns=[],  # No patterns - won't meet HIGH tier pattern requirement
+            trading_tf_patterns=[],
+        )
+
+        def mock_analyze(htf_data, trading_tf_data, ltf_data=None):
+            return modified_analysis
+
+        coordinator.analyze = mock_analyze
+
+        htf_data, trading_data = sample_timeframe_data
+        signals = generator.generate_tiered_signals("AAPL", htf_data, trading_data)
+
+        assert len(signals) == 1
+        signal = signals[0]
+        assert signal.tier == SignalTier.MEDIUM
+        assert signal.position_size_multiplier == 0.75
+        assert signal.signal_type == SignalType.LONG
+
+    def test_generate_low_tier_signal(self, sample_long_analysis, sample_timeframe_data):
+        """Test LOW tier signal generation with strong zone only."""
+        from dgas.prediction.engine import TieredSignalConfig, SignalTier
+        
+        coordinator = MultiTimeframeCoordinator("4h", "1h")
+        tiered_config = TieredSignalConfig()
+        generator = SignalGenerator(coordinator, tiered_config=tiered_config)
+
+        # Modify analysis to meet LOW but not MEDIUM tier criteria
+        # LOW: alignment >= 0.5, strength >= 0.4, zone >= 3.5, no pattern required
+        modified_analysis = replace(
+            sample_long_analysis,
+            alignment=replace(
+                sample_long_analysis.alignment,
+                alignment_score=Decimal("0.55"),  # Between LOW (0.5) and MEDIUM (0.6)
+            ),
+            signal_strength=Decimal("0.45"),  # Between LOW (0.4) and MEDIUM (0.5)
+            confluence_zones=[
+                replace(
+                    sample_long_analysis.confluence_zones[0],
+                    weighted_strength=Decimal("3.7"),  # Above LOW threshold (3.5)
+                )
+            ],
+            htf_patterns=[],
+            trading_tf_patterns=[],
+        )
+
+        def mock_analyze(htf_data, trading_tf_data, ltf_data=None):
+            return modified_analysis
+
+        coordinator.analyze = mock_analyze
+
+        htf_data, trading_data = sample_timeframe_data
+        signals = generator.generate_tiered_signals("AAPL", htf_data, trading_data)
+
+        assert len(signals) == 1
+        signal = signals[0]
+        assert signal.tier == SignalTier.LOW
+        assert signal.position_size_multiplier == 0.5
+        assert signal.signal_type == SignalType.LONG
+
+    def test_tiered_fallback_behavior(self, sample_long_analysis, sample_timeframe_data):
+        """Test that system tries HIGH -> MEDIUM -> LOW in order."""
+        from dgas.prediction.engine import TieredSignalConfig, SignalTier
+        
+        coordinator = MultiTimeframeCoordinator("4h", "1h")
+        tiered_config = TieredSignalConfig()
+        generator = SignalGenerator(coordinator, tiered_config=tiered_config)
+
+        # Analysis that only meets LOW tier (weak alignment/strength but very strong zone)
+        modified_analysis = replace(
+            sample_long_analysis,
+            alignment=replace(
+                sample_long_analysis.alignment,
+                alignment_score=Decimal("0.52"),  # Only meets LOW
+            ),
+            signal_strength=Decimal("0.42"),  # Only meets LOW
+            confluence_zones=[
+                replace(
+                    sample_long_analysis.confluence_zones[0],
+                    weighted_strength=Decimal("4.0"),  # Very strong zone
+                )
+            ],
+            htf_patterns=[],
+            trading_tf_patterns=[],
+        )
+
+        def mock_analyze(htf_data, trading_tf_data, ltf_data=None):
+            return modified_analysis
+
+        coordinator.analyze = mock_analyze
+
+        htf_data, trading_data = sample_timeframe_data
+        signals = generator.generate_tiered_signals("AAPL", htf_data, trading_data)
+
+        # Should generate LOW tier signal (HIGH and MEDIUM didn't qualify)
+        assert len(signals) == 1
+        assert signals[0].tier == SignalTier.LOW
+
+    def test_no_tiered_signal_when_criteria_not_met(self, sample_long_analysis, sample_timeframe_data):
+        """Test no signal generated when no tier meets criteria."""
+        from dgas.prediction.engine import TieredSignalConfig
+        
+        coordinator = MultiTimeframeCoordinator("4h", "1h")
+        tiered_config = TieredSignalConfig()
+        generator = SignalGenerator(coordinator, tiered_config=tiered_config)
+
+        # Analysis that doesn't meet any tier criteria
+        modified_analysis = replace(
+            sample_long_analysis,
+            alignment=replace(
+                sample_long_analysis.alignment,
+                alignment_score=Decimal("0.45"),  # Below all thresholds
+            ),
+            signal_strength=Decimal("0.35"),  # Below all thresholds
+            confluence_zones=[
+                replace(
+                    sample_long_analysis.confluence_zones[0],
+                    weighted_strength=Decimal("2.0"),  # Below all zone weight thresholds
+                )
+            ],
+        )
+
+        def mock_analyze(htf_data, trading_tf_data, ltf_data=None):
+            return modified_analysis
+
+        coordinator.analyze = mock_analyze
+
+        htf_data, trading_data = sample_timeframe_data
+        signals = generator.generate_tiered_signals("AAPL", htf_data, trading_data)
+
+        assert len(signals) == 0
+
+    def test_tiered_config_with_disabled_tiers(self, sample_long_analysis, sample_timeframe_data):
+        """Test tier generation with some tiers disabled."""
+        from dgas.prediction.engine import TieredSignalConfig, SignalTier
+        
+        coordinator = MultiTimeframeCoordinator("4h", "1h")
+        
+        # Only enable HIGH and LOW tiers, disable MEDIUM
+        tiered_config = TieredSignalConfig(
+            enabled_tiers=[SignalTier.HIGH, SignalTier.LOW]
+        )
+        generator = SignalGenerator(coordinator, tiered_config=tiered_config)
+
+        # Analysis that would qualify for MEDIUM tier
+        modified_analysis = replace(
+            sample_long_analysis,
+            alignment=replace(
+                sample_long_analysis.alignment,
+                alignment_score=Decimal("0.65"),
+            ),
+            signal_strength=Decimal("0.55"),
+            confluence_zones=[
+                replace(
+                    sample_long_analysis.confluence_zones[0],
+                    weighted_strength=Decimal("2.7"),
+                )
+            ],
+            htf_patterns=[],
+            trading_tf_patterns=[],
+        )
+
+        def mock_analyze(htf_data, trading_tf_data, ltf_data=None):
+            return modified_analysis
+
+        coordinator.analyze = mock_analyze
+
+        htf_data, trading_data = sample_timeframe_data
+        signals = generator.generate_tiered_signals("AAPL", htf_data, trading_data)
+
+        # Since MEDIUM is disabled and thresholds don't meet HIGH,
+        # should fall through to LOW tier (if zone is strong enough)
+        # But in this case zone weight (2.7) is below LOW threshold (3.5)
+        assert len(signals) == 0
+
+    def test_fallback_to_standard_generation_without_config(self, sample_long_analysis, sample_timeframe_data):
+        """Test that tiered generation falls back to standard when no config provided."""
+        coordinator = MultiTimeframeCoordinator("4h", "1h")
+        # No tiered_config provided
+        generator = SignalGenerator(coordinator)
+
+        def mock_analyze(htf_data, trading_tf_data, ltf_data=None):
+            return sample_long_analysis
+
+        coordinator.analyze = mock_analyze
+
+        htf_data, trading_data = sample_timeframe_data
+        signals = generator.generate_tiered_signals("AAPL", htf_data, trading_data)
+
+        # Should fall back to standard generate_signals
+        # Standard generation requires patterns, which sample_long_analysis has
+        assert len(signals) == 1
+        # Should not have tier information (uses standard generation)
+        assert signals[0].tier is None
+        assert signals[0].position_size_multiplier == 1.0  # Default
+
+
 class TestSignalAggregator:
     """Test SignalAggregator class."""
 

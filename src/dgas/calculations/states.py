@@ -39,6 +39,11 @@ class StateSeries:
     pldot_slope_trend: str  # "rising", "falling", "horizontal"
     confidence: Decimal
     state_change_reason: str | None = None
+    # NEW: Track the trend direction when congestion was entered
+    # This is preserved throughout congestion to accurately classify exit vs. reversal
+    trend_at_congestion_entrance: TrendDirection | None = None
+    # NEW: Total bars since entering congestion (for monitoring extended congestion)
+    bars_in_congestion: int = 0
 
 
 class MarketStateClassifier:
@@ -83,6 +88,10 @@ class MarketStateClassifier:
         bars_in_state = 0
         last_trend_direction: TrendDirection | None = None
 
+        # NEW: Track trend at congestion entrance - preserved through entire congestion phase
+        trend_at_congestion_entrance: TrendDirection | None = None
+        bars_in_congestion = 0
+
         # Position tracking for 3-bar rule
         recent_positions: List[int] = []  # Track last 3 positions relative to PLdot
 
@@ -100,13 +109,14 @@ class MarketStateClassifier:
             # Classify PLdot slope
             pldot_slope_trend = self._classify_pldot_slope(series.slope)
 
-            # Determine current state
+            # Determine current state - now passing trend_at_congestion_entrance
             state, direction, reason = self._apply_state_rules(
                 recent_positions,
                 prev_state,
                 last_trend_direction,
                 bars_in_state,
-                pldot_slope_trend
+                pldot_slope_trend,
+                trend_at_congestion_entrance,  # NEW: Pass preserved trend
             )
 
             # Update tracking
@@ -122,6 +132,23 @@ class MarketStateClassifier:
             elif state == MarketState.REVERSAL:
                 last_trend_direction = direction
 
+            # NEW: Track congestion entrance and duration
+            # Only track congestion that follows a confirmed trend
+            if state == MarketState.CONGESTION_ENTRANCE and prev_state == MarketState.TREND:
+                # Entering congestion from a trend - capture the trend direction
+                trend_at_congestion_entrance = last_trend_direction
+                bars_in_congestion = 1
+            elif state in [MarketState.CONGESTION_ACTION, MarketState.CONGESTION_ENTRANCE]:
+                # Only increment if we're in "real" congestion (after a trend)
+                if trend_at_congestion_entrance is not None:
+                    bars_in_congestion += 1
+                # If trend_at_congestion_entrance is None, we're in early indeterminate state
+                # Don't track bars_in_congestion for these early states
+            elif state in [MarketState.TREND, MarketState.REVERSAL, MarketState.CONGESTION_EXIT]:
+                # Exiting congestion or in trend
+                # Don't reset yet - we need the values for CONGESTION_EXIT classification
+                pass
+
             # Calculate confidence
             confidence = self._calculate_confidence(
                 state,
@@ -131,7 +158,7 @@ class MarketStateClassifier:
                 direction
             )
 
-            # Create state point
+            # Create state point with new fields
             results.append(
                 StateSeries(
                     timestamp=series.timestamp,
@@ -142,8 +169,15 @@ class MarketStateClassifier:
                     pldot_slope_trend=pldot_slope_trend,
                     confidence=confidence,
                     state_change_reason=reason if state != prev_state else None,
+                    trend_at_congestion_entrance=trend_at_congestion_entrance,  # NEW
+                    bars_in_congestion=bars_in_congestion,  # NEW
                 )
             )
+
+            # Reset congestion tracking after recording the exit bar
+            if state in [MarketState.TREND, MarketState.REVERSAL]:
+                trend_at_congestion_entrance = None
+                bars_in_congestion = 0
 
             prev_state = state
 
@@ -167,9 +201,15 @@ class MarketStateClassifier:
         prior_trend_direction: TrendDirection | None,
         bars_in_state: int,
         pldot_slope_trend: str,
+        trend_at_congestion_entrance: TrendDirection | None = None,  # NEW: Preserved trend from congestion entrance
     ) -> tuple[MarketState, TrendDirection, str]:
         """
         Apply Drummond 3-bar state detection rules.
+
+        The trend_at_congestion_entrance parameter ensures accurate classification
+        of CONGESTION_EXIT vs REVERSAL even after extended congestion phases.
+        During congestion, prior_trend_direction may drift, but trend_at_congestion_entrance
+        preserves the original trend direction when congestion was entered.
 
         Returns:
             (state, trend_direction, reason_for_state)
@@ -181,15 +221,20 @@ class MarketStateClassifier:
         all_above = all(p == 1 for p in recent_positions[-3:])
         all_below = all(p == -1 for p in recent_positions[-3:])
 
+        # For congestion exit/reversal decisions, prefer the preserved trend from congestion entrance
+        # This ensures accurate classification even after extended congestion phases
+        effective_prior_trend = trend_at_congestion_entrance or prior_trend_direction
+
         # RULE 1: TREND - 3 consecutive closes on same side
         if all_above:
             if previous_state == MarketState.TREND and prior_trend_direction == TrendDirection.UP:
                 return (MarketState.TREND, TrendDirection.UP, "Trend continuation")
             elif previous_state in [MarketState.CONGESTION_ACTION, MarketState.CONGESTION_ENTRANCE]:
-                if prior_trend_direction == TrendDirection.UP:
+                # Use effective_prior_trend for accurate exit vs reversal classification
+                if effective_prior_trend == TrendDirection.UP:
                     return (MarketState.CONGESTION_EXIT, TrendDirection.UP, "Congestion exit to uptrend")
-                elif prior_trend_direction == TrendDirection.DOWN:
-                    # Had a downtrend before, now reversing to uptrend
+                elif effective_prior_trend == TrendDirection.DOWN:
+                    # Had a downtrend before congestion, now reversing to uptrend
                     return (MarketState.REVERSAL, TrendDirection.UP, "Reversal to uptrend")
                 else:
                     # No prior trend direction - this is a new trend from congestion
@@ -201,10 +246,11 @@ class MarketStateClassifier:
             if previous_state == MarketState.TREND and prior_trend_direction == TrendDirection.DOWN:
                 return (MarketState.TREND, TrendDirection.DOWN, "Trend continuation")
             elif previous_state in [MarketState.CONGESTION_ACTION, MarketState.CONGESTION_ENTRANCE]:
-                if prior_trend_direction == TrendDirection.DOWN:
+                # Use effective_prior_trend for accurate exit vs reversal classification
+                if effective_prior_trend == TrendDirection.DOWN:
                     return (MarketState.CONGESTION_EXIT, TrendDirection.DOWN, "Congestion exit to downtrend")
-                elif prior_trend_direction == TrendDirection.UP:
-                    # Had an uptrend before, now reversing to downtrend
+                elif effective_prior_trend == TrendDirection.UP:
+                    # Had an uptrend before congestion, now reversing to downtrend
                     return (MarketState.REVERSAL, TrendDirection.DOWN, "Reversal to downtrend")
                 else:
                     # No prior trend direction - this is a new trend from congestion
@@ -224,7 +270,7 @@ class MarketStateClassifier:
         if previous_state in [MarketState.CONGESTION_ENTRANCE, MarketState.CONGESTION_ACTION, None]:
             return (
                 MarketState.CONGESTION_ACTION,
-                prior_trend_direction or TrendDirection.NEUTRAL,
+                effective_prior_trend or TrendDirection.NEUTRAL,
                 "Alternating closes indicate congestion"
             )
 

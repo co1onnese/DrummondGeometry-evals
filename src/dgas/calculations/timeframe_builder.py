@@ -15,6 +15,7 @@ from .patterns import (
     detect_exhaust,
     detect_pldot_push,
     detect_pldot_refresh,
+    detect_termination_events,
 )
 from .pldot import PLDotCalculator
 from .states import MarketStateClassifier
@@ -63,6 +64,14 @@ def build_timeframe_data(
         tolerance = max(avg_range * 0.3, envelope_width * 0.25, 0.05)
         zones = aggregate_zones(drummond_lines, tolerance=tolerance)
         drummond_zones = tuple(zones)
+        
+        # Detect termination events when price approaches projected Drummond line zones
+        termination_events = detect_termination_events(
+            intervals=intervals,
+            zones=zones,
+            pldot=pldot_series,
+        )
+        patterns.extend(termination_events)
 
     return TimeframeData(
         timeframe=timeframe,

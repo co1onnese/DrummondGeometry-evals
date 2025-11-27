@@ -32,6 +32,84 @@ class SignalType(Enum):
     EXIT_SHORT = "EXIT_SHORT"
 
 
+class SignalTier(Enum):
+    """
+    Signal confidence tier for tiered signal generation.
+    
+    Tiers represent different levels of signal quality and confidence:
+    - HIGH: Full confluence with pattern support, highest probability
+    - MEDIUM: Zone-based with good alignment, moderate probability
+    - LOW: Strong zone only, lower probability but still actionable
+    """
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+
+
+@dataclass
+class TierThresholds:
+    """Threshold configuration for a single signal tier."""
+    min_alignment_score: float
+    min_signal_strength: float
+    min_zone_weight: float
+    require_pattern: bool
+    position_size_multiplier: float  # Multiplier for position sizing (e.g., 1.0, 0.75, 0.5)
+
+
+@dataclass
+class TieredSignalConfig:
+    """
+    Configuration for tiered signal generation.
+    
+    This allows generating signals at different confidence levels,
+    each with appropriate thresholds and position sizing.
+    """
+    # High tier: Full confluence with pattern support
+    high_tier: TierThresholds = field(default_factory=lambda: TierThresholds(
+        min_alignment_score=0.7,
+        min_signal_strength=0.65,
+        min_zone_weight=3.0,
+        require_pattern=True,
+        position_size_multiplier=1.0,
+    ))
+    
+    # Medium tier: Zone-based with good alignment
+    medium_tier: TierThresholds = field(default_factory=lambda: TierThresholds(
+        min_alignment_score=0.6,
+        min_signal_strength=0.5,
+        min_zone_weight=2.5,
+        require_pattern=False,
+        position_size_multiplier=0.75,
+    ))
+    
+    # Low tier: Strong zone only
+    low_tier: TierThresholds = field(default_factory=lambda: TierThresholds(
+        min_alignment_score=0.5,
+        min_signal_strength=0.4,
+        min_zone_weight=3.5,  # Requires stronger zone to compensate for lower alignment
+        require_pattern=False,
+        position_size_multiplier=0.5,
+    ))
+    
+    # Which tiers are enabled
+    enabled_tiers: List[SignalTier] = field(default_factory=lambda: [
+        SignalTier.HIGH,
+        SignalTier.MEDIUM,
+        SignalTier.LOW,
+    ])
+
+    def get_tier_thresholds(self, tier: SignalTier) -> TierThresholds:
+        """Get thresholds for a specific tier."""
+        if tier == SignalTier.HIGH:
+            return self.high_tier
+        elif tier == SignalTier.MEDIUM:
+            return self.medium_tier
+        elif tier == SignalTier.LOW:
+            return self.low_tier
+        else:
+            raise ValueError(f"Unknown tier: {tier}")
+
+
 @dataclass(frozen=True)
 class GeneratedSignal:
     """
@@ -68,6 +146,10 @@ class GeneratedSignal:
     htf_timeframe: str
     trading_timeframe: str
 
+    # Tiered signal support (Priority 4 enhancement)
+    tier: Optional[SignalTier] = None  # Signal quality tier (HIGH, MEDIUM, LOW)
+    position_size_multiplier: float = 1.0  # Position sizing multiplier based on tier
+
     # Optional notification tracking (filled by NotificationRouter)
     notification_sent: bool = False
     notification_channels: Optional[List[str]] = None
@@ -91,6 +173,7 @@ class SignalGenerator:
         target_rr_ratio: float = 2.0,
         min_zone_weight: float = 2.5,
         required_pattern_strength: int = 2,
+        tiered_config: Optional[TieredSignalConfig] = None,
     ):
         """
         Initialize signal generator.
@@ -101,6 +184,9 @@ class SignalGenerator:
             min_signal_strength: Minimum signal strength threshold
             stop_loss_atr_multiplier: ATR multiplier for stop loss distance
             target_rr_ratio: Risk/reward ratio for target calculation
+            min_zone_weight: Minimum zone weight for signal generation
+            required_pattern_strength: Minimum pattern strength required
+            tiered_config: Optional tiered signal configuration for multi-tier generation
         """
         self.coordinator = coordinator
         self.min_alignment_score = min_alignment_score
@@ -109,6 +195,7 @@ class SignalGenerator:
         self.target_rr_ratio = target_rr_ratio
         self.min_zone_weight = min_zone_weight
         self.required_pattern_strength = required_pattern_strength
+        self.tiered_config = tiered_config
 
     def generate_signals(
         self,
@@ -208,6 +295,384 @@ class SignalGenerator:
 
         return [signal]
 
+    def generate_tiered_signals(
+        self,
+        symbol: str,
+        htf_data: TimeframeData,
+        trading_tf_data: TimeframeData,
+        ltf_data: Optional[TimeframeData] = None,
+    ) -> List[GeneratedSignal]:
+        """
+        Generate trading signals using tiered approach.
+        
+        This method tries to generate signals at different confidence tiers,
+        allowing the system to capture medium and low confidence opportunities
+        while prioritizing high confidence setups.
+        
+        The method will return at most one signal, using the highest tier that
+        meets its criteria. This prevents duplicate signals for the same opportunity.
+        
+        Args:
+            symbol: Market symbol
+            htf_data: Higher timeframe data
+            trading_tf_data: Trading timeframe data
+            ltf_data: Optional lower timeframe data
+            
+        Returns:
+            List of generated signals (0-1 signal, highest tier that qualifies)
+        """
+        if self.tiered_config is None:
+            # Fall back to standard signal generation
+            return self.generate_signals(symbol, htf_data, trading_tf_data, ltf_data)
+        
+        # Run multi-timeframe analysis once
+        analysis = self.coordinator.analyze(htf_data, trading_tf_data, ltf_data)
+        
+        # Try each tier in priority order (HIGH -> MEDIUM -> LOW)
+        for tier in [SignalTier.HIGH, SignalTier.MEDIUM, SignalTier.LOW]:
+            if tier not in self.tiered_config.enabled_tiers:
+                continue
+            
+            signal = self._try_generate_signal_for_tier(
+                symbol, analysis, trading_tf_data, tier
+            )
+            
+            if signal:
+                logger.info(
+                    f"{symbol}: Generated {tier.value} tier signal - "
+                    f"confidence={signal.confidence:.2f}, "
+                    f"position_multiplier={signal.position_size_multiplier:.2f}"
+                )
+                return [signal]
+        
+        # No tier met criteria
+        return []
+
+    def _try_generate_signal_for_tier(
+        self,
+        symbol: str,
+        analysis: MultiTimeframeAnalysis,
+        trading_tf_data: TimeframeData,
+        tier: SignalTier,
+    ) -> Optional[GeneratedSignal]:
+        """
+        Try to generate a signal for a specific tier.
+        
+        Args:
+            symbol: Market symbol
+            analysis: Multi-timeframe analysis
+            trading_tf_data: Trading timeframe data
+            tier: Tier to try
+            
+        Returns:
+            GeneratedSignal if tier criteria met, None otherwise
+        """
+        thresholds = self.tiered_config.get_tier_thresholds(tier)
+        
+        # Check tier-specific criteria
+        if not self._meets_tier_criteria(analysis, thresholds):
+            return None
+        
+        # Determine direction
+        direction = self._determine_direction_for_tier(analysis, thresholds)
+        if direction is None:
+            return None
+        
+        # Map to signal type
+        signal_type = self._map_direction_to_signal(direction, analysis)
+        if signal_type is None:
+            return None
+        
+        # Exit signals don't use tiered logic
+        if signal_type in (SignalType.EXIT_LONG, SignalType.EXIT_SHORT):
+            return None
+        
+        # Check pattern requirement for tier
+        if thresholds.require_pattern:
+            if not self._has_supporting_pattern(analysis, direction):
+                return None
+        
+        # Select zone
+        zone = self._select_zone_for_tier(analysis, direction, thresholds)
+        if zone is None:
+            return None
+        
+        # Calculate levels
+        entry_price, stop_loss, target_price = self._calculate_levels(
+            signal_type, analysis, trading_tf_data, zone
+        )
+        
+        # Calculate confidence
+        confidence = self._calculate_confidence(analysis)
+        
+        # Calculate risk/reward ratio
+        risk = abs(entry_price - stop_loss)
+        reward = abs(target_price - entry_price)
+        rr_ratio = float(reward / risk) if risk > 0 else 0.0
+        
+        # Build pattern context
+        pattern_context = self._build_pattern_context(analysis)
+        pattern_context["tier"] = tier.value
+        
+        # Create signal with tier info
+        signal = GeneratedSignal(
+            symbol=symbol,
+            signal_timestamp=analysis.timestamp,
+            signal_type=signal_type,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            target_price=target_price,
+            confidence=confidence,
+            signal_strength=float(analysis.signal_strength),
+            timeframe_alignment=float(analysis.alignment.alignment_score),
+            risk_reward_ratio=rr_ratio,
+            htf_trend=analysis.htf_trend,
+            trading_tf_state=analysis.alignment.trading_tf_state.value,
+            confluence_zones_count=len(analysis.confluence_zones),
+            pattern_context=pattern_context,
+            htf_timeframe=analysis.htf_timeframe,
+            trading_timeframe=analysis.trading_timeframe,
+            tier=tier,
+            position_size_multiplier=thresholds.position_size_multiplier,
+        )
+        
+        return signal
+
+    def _meets_tier_criteria(
+        self, 
+        analysis: MultiTimeframeAnalysis, 
+        thresholds: TierThresholds
+    ) -> bool:
+        """Check if analysis meets tier-specific criteria."""
+        # Check alignment score
+        if float(analysis.alignment.alignment_score) < thresholds.min_alignment_score:
+            return False
+        
+        # Check signal strength
+        if float(analysis.signal_strength) < thresholds.min_signal_strength:
+            return False
+        
+        # Check trade permitted by HTF
+        if not analysis.alignment.trade_permitted:
+            return False
+        
+        # Check zones exist
+        if not analysis.confluence_zones:
+            return False
+        
+        return True
+
+    def _determine_direction_for_tier(
+        self, 
+        analysis: MultiTimeframeAnalysis, 
+        thresholds: TierThresholds
+    ) -> Optional[TrendDirection]:
+        """Determine direction using tier-specific thresholds."""
+        if float(analysis.alignment.alignment_score) < thresholds.min_alignment_score:
+            return None
+        if float(analysis.signal_strength) < thresholds.min_signal_strength:
+            return None
+        if not analysis.alignment.trade_permitted:
+            return None
+        
+        if analysis.recommended_action == "long" and analysis.htf_trend == TrendDirection.UP:
+            return TrendDirection.UP
+        if analysis.recommended_action == "short" and analysis.htf_trend == TrendDirection.DOWN:
+            return TrendDirection.DOWN
+        
+        return None
+
+    def _select_zone_for_tier(
+        self, 
+        analysis: MultiTimeframeAnalysis, 
+        direction: TrendDirection,
+        thresholds: TierThresholds
+    ) -> Optional[ConfluenceZone]:
+        """Select confluence zone using tier-specific thresholds."""
+        desired_type = "support" if direction == TrendDirection.UP else "resistance"
+        for zone in analysis.confluence_zones:
+            if zone.zone_type != desired_type:
+                continue
+            if float(zone.weighted_strength) >= thresholds.min_zone_weight:
+                return zone
+        return None
+
+    def generate_exit_signals(
+        self,
+        symbol: str,
+        htf_data: TimeframeData,
+        trading_tf_data: TimeframeData,
+        current_position: SignalType,
+        ltf_data: Optional[TimeframeData] = None,
+    ) -> List[GeneratedSignal]:
+        """
+        Generate exit signals based on exhaust patterns or HTF trend reversal.
+        
+        This method is designed to be called when there is an existing position
+        to check if exit conditions are met.
+        
+        Exit conditions:
+        1. Exhaust pattern detected against current position direction
+        2. HTF trend reversal against current position
+        3. Termination touch at key level against position
+        
+        Args:
+            symbol: Market symbol
+            htf_data: Higher timeframe data
+            trading_tf_data: Trading timeframe data
+            current_position: Current position type (LONG or SHORT)
+            ltf_data: Optional lower timeframe data
+            
+        Returns:
+            List of exit signals (typically 0-1)
+        """
+        if current_position not in (SignalType.LONG, SignalType.SHORT):
+            logger.debug(f"{symbol}: Invalid position type for exit signal: {current_position}")
+            return []
+        
+        # Run multi-timeframe analysis
+        analysis = self.coordinator.analyze(htf_data, trading_tf_data, ltf_data)
+        
+        exit_reasons: List[str] = []
+        exit_confidence = 0.0
+        
+        # Check for exhaust patterns against position
+        exhaust_exit = self._check_exhaust_exit(analysis, current_position)
+        if exhaust_exit:
+            exit_reasons.append("exhaust_pattern")
+            exit_confidence = max(exit_confidence, 0.7)
+        
+        # Check for HTF trend reversal against position
+        htf_reversal = self._check_htf_trend_reversal(analysis, current_position)
+        if htf_reversal:
+            exit_reasons.append("htf_trend_reversal")
+            exit_confidence = max(exit_confidence, 0.8)
+        
+        # Check for termination touch against position
+        termination_exit = self._check_termination_exit(analysis, current_position)
+        if termination_exit:
+            exit_reasons.append("termination_touch")
+            exit_confidence = max(exit_confidence, 0.65)
+        
+        # No exit conditions met
+        if not exit_reasons:
+            return []
+        
+        # Determine exit signal type
+        exit_signal_type = (
+            SignalType.EXIT_LONG if current_position == SignalType.LONG 
+            else SignalType.EXIT_SHORT
+        )
+        
+        # Get current price for exit
+        if not trading_tf_data.pldot_series:
+            logger.warning(f"{symbol}: No PLdot data for exit price calculation")
+            return []
+        
+        current_pldot = trading_tf_data.pldot_series[-1]
+        exit_price = current_pldot.value
+        
+        # Build pattern context with exit reasons
+        pattern_context = self._build_pattern_context(analysis)
+        pattern_context["exit_reasons"] = exit_reasons
+        
+        # Create exit signal
+        signal = GeneratedSignal(
+            symbol=symbol,
+            signal_timestamp=analysis.timestamp,
+            signal_type=exit_signal_type,
+            entry_price=exit_price,
+            stop_loss=exit_price,  # N/A for exits
+            target_price=exit_price,  # N/A for exits
+            confidence=exit_confidence,
+            signal_strength=float(analysis.signal_strength),
+            timeframe_alignment=float(analysis.alignment.alignment_score),
+            risk_reward_ratio=0.0,  # N/A for exits
+            htf_trend=analysis.htf_trend,
+            trading_tf_state=analysis.alignment.trading_tf_state.value,
+            confluence_zones_count=len(analysis.confluence_zones),
+            pattern_context=pattern_context,
+            htf_timeframe=analysis.htf_timeframe,
+            trading_timeframe=analysis.trading_timeframe,
+        )
+        
+        logger.info(
+            f"{symbol}: Exit signal generated - type={exit_signal_type.value}, "
+            f"reasons={exit_reasons}, confidence={exit_confidence:.2f}"
+        )
+        
+        return [signal]
+
+    def _check_exhaust_exit(
+        self, 
+        analysis: MultiTimeframeAnalysis, 
+        current_position: SignalType
+    ) -> bool:
+        """
+        Check if exhaust pattern indicates exit from current position.
+        
+        For LONG position: bearish exhaust (direction=-1) signals exit
+        For SHORT position: bullish exhaust (direction=1) signals exit
+        """
+        # Determine which exhaust direction would trigger exit
+        exit_direction = -1 if current_position == SignalType.LONG else 1
+        
+        def is_exit_exhaust(event: PatternEvent) -> bool:
+            return (
+                event.pattern_type == PatternType.EXHAUST
+                and event.direction == exit_direction
+                and event.strength >= self.required_pattern_strength
+            )
+        
+        # Check both timeframes for exhaust patterns
+        return (
+            any(is_exit_exhaust(e) for e in analysis.trading_tf_patterns) or
+            any(is_exit_exhaust(e) for e in analysis.htf_patterns)
+        )
+
+    def _check_htf_trend_reversal(
+        self, 
+        analysis: MultiTimeframeAnalysis, 
+        current_position: SignalType
+    ) -> bool:
+        """
+        Check if HTF trend has reversed against current position.
+        
+        For LONG position: HTF trend DOWN signals exit
+        For SHORT position: HTF trend UP signals exit
+        """
+        if current_position == SignalType.LONG:
+            return analysis.htf_trend == TrendDirection.DOWN
+        else:  # SHORT
+            return analysis.htf_trend == TrendDirection.UP
+
+    def _check_termination_exit(
+        self, 
+        analysis: MultiTimeframeAnalysis, 
+        current_position: SignalType
+    ) -> bool:
+        """
+        Check if termination touch at key level suggests exit.
+        
+        For LONG position: termination touch with bearish direction signals exit
+        For SHORT position: termination touch with bullish direction signals exit
+        """
+        # Determine which termination direction would trigger exit
+        exit_direction = -1 if current_position == SignalType.LONG else 1
+        
+        def is_exit_termination(event: PatternEvent) -> bool:
+            return (
+                event.pattern_type == PatternType.TERMINATION_TOUCH
+                and event.direction == exit_direction
+                and event.strength >= self.required_pattern_strength
+            )
+        
+        # Check both timeframes for termination patterns
+        return (
+            any(is_exit_termination(e) for e in analysis.trading_tf_patterns) or
+            any(is_exit_termination(e) for e in analysis.htf_patterns)
+        )
+
     def _meets_minimum_criteria(self, analysis: MultiTimeframeAnalysis) -> bool:
         """
         Check if analysis meets minimum criteria for signal generation.
@@ -295,6 +760,7 @@ class SignalGenerator:
                     PatternType.PLDOT_PUSH,
                     PatternType.C_WAVE,
                     PatternType.PLDOT_REFRESH,
+                    PatternType.TERMINATION_TOUCH,  # Price reached projected Drummond line
                 }
                 and event.strength >= self.required_pattern_strength
             )

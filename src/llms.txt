@@ -2,9 +2,16 @@
 # LLM-Optimized Codebase Reference
 
 ## Project Overview
-Local-first market data ingestion and Drummond Geometry analysis toolkit implementing multi-timeframe coordination for trading signals. Production-ready system with prediction engine, real-time dashboard, CLI tools, continuous data collection, and performance optimizations.
+Local-first market data ingestion and Drummond Geometry analysis toolkit implementing multi-timeframe coordination for trading signals. Production-ready system with prediction engine, real-time dashboard, CLI tools, continuous data collection, performance optimizations, and recent improvements to signal accuracy and pattern detection.
 
 **Stack**: Python 3.11+, PostgreSQL, EODHD API, pandas/numpy, rich (CLI), streamlit (dashboard), apscheduler (scheduling), websockets (real-time data)
+
+**Recent Enhancements** (2024):
+- Drummond line termination detection for projected level interactions
+- Exhaust-based exit signal generation for risk management
+- Congestion state tracking fix preserving trend through extended congestion
+- Tiered signal confidence system (HIGH/MEDIUM/LOW) for flexible signal generation
+- Envelope calculation validation comparing pldot_range vs hlc_range methods
 
 ---
 
@@ -285,7 +292,11 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 **dgas/calculations/envelopes.py**
 - `EnvelopeSeries`: Frozen dataclass (timestamp, center, upper, lower, width, position, method)
 - `EnvelopeCalculator(method: str = "pldot_range", period: int = 3, multiplier: float = 1.5, percent: float = 0.02)`
-  - Methods: "pldot_range" (Drummond 3-period std), "atr" (ATR-based), "percentage" (fixed %)
+  - Methods:
+    - "pldot_range": 3-period standard deviation of PLdot values (Drummond default)
+    - "hlc_range": 3-period high-low range of bars forming PLdot (alternative)
+    - "atr": ATR-based (legacy)
+    - "percentage": Fixed percentage (legacy)
   - `from_intervals(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries]) -> List[EnvelopeSeries]`
 
 **dgas/calculations/drummond_lines.py**
@@ -298,18 +309,21 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 **dgas/calculations/states.py**
 - `MarketState(Enum)`: TREND, CONGESTION_ENTRANCE, CONGESTION_ACTION, CONGESTION_EXIT, REVERSAL
 - `TrendDirection(Enum)`: UP, DOWN, NEUTRAL
-- `StateSeries`: Frozen dataclass (timestamp, state, trend_direction, bars_in_state, previous_state, pldot_slope_trend, confidence, state_change_reason)
+- `StateSeries`: Frozen dataclass (timestamp, state, trend_direction, bars_in_state, previous_state, pldot_slope_trend, confidence, state_change_reason, trend_at_congestion_entrance, bars_in_congestion)
 - `MarketStateClassifier(slope_threshold: float = 0.0001)`
   - `classify(intervals: Sequence[IntervalData], pldot_series: Sequence[PLDotSeries]) -> List[StateSeries]`: Applies Drummond 3-bar rule
+  - Preserves `trend_at_congestion_entrance` through extended congestion for accurate exit vs reversal classification
 
 **dgas/calculations/patterns.py**
-- `PatternType(Enum)`: PLDOT_PUSH, PLDOT_REFRESH, EXHAUST, C_WAVE, CONGESTION_OSCILLATION
+- `PatternType(Enum)`: PLDOT_PUSH, PLDOT_REFRESH, EXHAUST, C_WAVE, CONGESTION_OSCILLATION, TERMINATION_APPROACH, TERMINATION_TOUCH
 - `PatternEvent`: Frozen dataclass (pattern_type, direction, start_timestamp, end_timestamp, strength)
+- `TerminationConfig`: Dataclass (approach_threshold_pct=0.5, touch_threshold_pct=0.15, min_zone_strength=2, lookback_bars=5, require_momentum_fade=True, momentum_fade_threshold=0.0)
 - `detect_pldot_push(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries]) -> List[PatternEvent]`: 3+ bars where close and PLdot slope align
 - `detect_pldot_refresh(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries], tolerance: float = 0.1) -> List[PatternEvent]`: Price far from PLdot then returns
 - `detect_exhaust(intervals: Sequence[IntervalData], pldot: Sequence[PLDotSeries], envelopes: Sequence[EnvelopeSeries], extension_threshold: float = 2.0) -> List[PatternEvent]`: Price extends beyond envelope then reverses
 - `detect_c_wave(envelopes: Sequence[EnvelopeSeries], pldot: Sequence[PLDotSeries] | None, intervals: Sequence[IntervalData] | None) -> List[PatternEvent]`: 3+ bars at envelope extremes
 - `detect_congestion_oscillation(envelopes: Sequence[EnvelopeSeries]) -> List[PatternEvent]`: 4+ bars oscillating in middle envelope region
+- `detect_termination_events(intervals: Sequence[IntervalData], zones: Sequence[DrummondZone], pldot: Sequence[PLDotSeries] | None, config: TerminationConfig | None) -> List[PatternEvent]`: Price approaches/touches projected Drummond line terminations
 
 **dgas/calculations/multi_timeframe.py**
 - `TimeframeType(Enum)`: HIGHER, TRADING, LOWER
@@ -470,6 +484,9 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 **dgas/backtesting/strategies/multi_timeframe.py**
 - `MultiTimeframeStrategyConfig(StrategyConfig)`: Configuration for multi-timeframe strategy
 - `MultiTimeframeStrategy(BaseStrategy)`: Multi-timeframe strategy implementation
+  - Supports TERMINATION_TOUCH pattern for entry signals
+  - Checks termination events for exit signals
+  - Uses trend alignment and confluence zones
 
 **dgas/backtesting/strategies/prediction_signal.py**
 - `PredictionSignalStrategyConfig(StrategyConfig)`: Configuration for prediction signal strategy
@@ -515,9 +532,14 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 
 **dgas/prediction/engine.py**
 - `SignalType(Enum)`: LONG, SHORT, EXIT_LONG, EXIT_SHORT
-- `GeneratedSignal`: Complete trading signal with context (symbol, signal_timestamp, signal_type, entry_price, stop_loss, target_price, confidence, signal_strength, timeframe_alignment, risk_reward_ratio, htf_trend, trading_tf_state, confluence_zones_count, pattern_context, notification tracking, outcome tracking)
-- `SignalGenerator(coordinator, min_alignment_score, min_signal_strength, stop_loss_atr_multiplier, target_rr_ratio)`: Signal generation from multi-timeframe analysis
+- `SignalTier(Enum)`: HIGH, MEDIUM, LOW
+- `TierThresholds`: Dataclass (min_alignment_score, min_signal_strength, min_zone_weight, require_pattern, position_size_multiplier)
+- `TieredSignalConfig`: Dataclass with high_tier, medium_tier, low_tier thresholds and enabled_tiers
+- `GeneratedSignal`: Complete trading signal with context (symbol, signal_timestamp, signal_type, entry_price, stop_loss, target_price, confidence, signal_strength, timeframe_alignment, risk_reward_ratio, htf_trend, trading_tf_state, confluence_zones_count, pattern_context, tier, position_size_multiplier, notification tracking, outcome tracking)
+- `SignalGenerator(coordinator, min_alignment_score, min_signal_strength, stop_loss_atr_multiplier, target_rr_ratio, min_zone_weight, required_pattern_strength, tiered_config)`: Signal generation from multi-timeframe analysis
   - `generate_signals(symbol: str, htf_data: TimeframeData, trading_tf_data: TimeframeData, ltf_data: TimeframeData | None) -> List[GeneratedSignal]`: Create actionable signals
+  - `generate_tiered_signals(symbol: str, htf_data: TimeframeData, trading_tf_data: TimeframeData, ltf_data: TimeframeData | None) -> List[GeneratedSignal]`: Generate signals using tier system
+  - `generate_exit_signals(symbol: str, htf_data: TimeframeData, trading_tf_data: TimeframeData, current_position: SignalType, ltf_data: TimeframeData | None) -> List[GeneratedSignal]`: Generate exit signals based on exhaust, HTF reversal, or termination
 - `SignalAggregator(dedup_time_window_minutes, min_confidence, min_alignment)`: De-duplication and ranking
   - `aggregate_signals(signals: List[GeneratedSignal], min_confidence, min_alignment, enabled_patterns, max_signals) -> List[GeneratedSignal]`: Filter, rank, deduplicate
 - `PredictionRunResult`: Execution metrics from prediction cycle
@@ -688,6 +710,19 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 
 ---
 
+## Scripts & Utilities
+
+**scripts/validate_envelope_methods.py**
+- `EnvelopeMetrics`: Validation metrics for envelope methods
+- `ValidationResult`: Complete validation result comparing methods
+- `load_data(conn: psycopg.Connection, symbol: str, interval: str, days: int) -> Tuple[List[IntervalData], Optional[str]]`: Load historical data
+- `calculate_envelope_metrics(intervals: List[IntervalData], envelopes: List[EnvelopeSeries], method: str, touch_threshold: float, reversal_bars: int) -> EnvelopeMetrics`: Calculate validation metrics
+- `validate_envelope_methods(conn: psycopg.Connection, symbol: str, interval: str, days: int, period: int, multiplier: float) -> Optional[ValidationResult]`: Compare pldot_range and hlc_range methods
+- `print_metrics_comparison(result: ValidationResult) -> None`: Print formatted comparison
+- `main()`: CLI entry point for envelope validation
+
+---
+
 ## File Connection Map (ASCII)
 
 ```
@@ -720,20 +755,20 @@ Local-first market data ingestion and Drummond Geometry analysis toolkit impleme
 ┌───────────────┐   ┌────────────────────┐   ┌────────────────┐   ┌────────────────────┐
 │  Database     │   │ Data Ingestion     │   │ Calculations    │   │ Backtesting         │
 │  db/          │   │ data/              │   │ calculations/   │   │ backtesting/       │
-│  - connection_pool.py                                                  │   │ - client, repo    │   │ - PLdot/States/    │   │ - runner, engine,  │
-│  - enhanced_persistence.py                                              │   │ - quality,         │   │   Patterns/MTF    │   │   metrics,         │
-│  - query_cache.py                                                       │   │   ingestion       │   │ - cache/profiler  │   │   persistence/     │
-│  - performance_monitor.py                                               │   │ - exchange_calendar│   │ - optimized_*      │   │   reporting        │
-│  - persistence.py                                                      │   │ - collection_*     │   │ - timeframe_builder│   │ - strategies/      │
-│  - migrations.py                                                        │   │ - websocket_*      │   │                   │   │   (base, registry) │
-│  - optimizer.py                                                        │   │ - tick_aggregator  │   │                   │   │ - portfolio_*      │
-│                                                                          │   │                   │   │                   │   │ - signal_*         │
-│                                                                          │   │                   │   │                   │   │ - execution/       │
+│  - connection_pool.py                │   │ - client, repo    │   │ - PLdot/States/    │   │ - runner, engine,  │
+│  - enhanced_persistence.py           │   │ - quality,         │   │   Patterns/MTF    │   │   metrics,         │
+│  - query_cache.py                    │   │   ingestion       │   │ - cache/profiler  │   │   persistence/     │
+│  - performance_monitor.py            │   │ - exchange_calendar│   │ - optimized_*      │   │   reporting        │
+│  - persistence.py                    │   │ - collection_*     │   │ - timeframe_builder│   │ - strategies/      │
+│  - migrations.py                     │   │ - websocket_*      │   │ - termination     │   │   (base, registry) │
+│  - optimizer.py                      │   │ - tick_aggregator  │   │   patterns        │   │ - portfolio_*      │
+│                                      │   │                   │   │ - envelope hlc    │   │ - signal_*         │
+│                                      │   │                   │   │   range method    │   │ - execution/       │
 └──────┬────────┘   └─────────┬──────────┘   └────────┬───────┘   └────────┬──────────┘
        │                      │                      │                    │
        ↓                      ↓                      ↓                    ↓
 PostgreSQL ← bulk_upsert_market_data()   Indicator outputs → strategies   persist_backtest()
-Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis, 
+Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
         prediction_runs, generated_signals, prediction_metrics, scheduler_state,
         backtest_results, backtest_trades, exchanges, market_holidays, trading_days,
         data_collection_runs
@@ -742,6 +777,8 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 │                        Prediction System                                     │
 │  prediction/                                                                 │
 │  - engine.py → SignalGenerator, SignalAggregator, PredictionEngine         │
+│    - Tiered signal generation (HIGH/MEDIUM/LOW tiers)                      │
+│    - Exit signal generation (exhaust/HTF reversal/termination)             │
 │  - scheduler.py → PredictionScheduler, MarketHoursManager                   │
 │  - persistence.py → PredictionPersistence                                   │
 │  - notifications/router.py → NotificationRouter                              │
@@ -776,6 +813,8 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 │  - io_optimizer.py → Batch I/O, memory monitoring, file writing            │
 │  utils/                                                                      │
 │  - market_hours_filter.py → Regular hours filtering                         │
+│  scripts/                                                                    │
+│  - validate_envelope_methods.py → Envelope method comparison/validation     │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -785,15 +824,21 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 
 1. **Configuration**: `config/loader.py` loads YAML/JSON → `config/adapter.py` merges with env vars → `UnifiedSettings` provides unified interface
 2. **CLI Routing**: `__main__.py` dispatches to subcommands (analyze, backtest, configure, data, data-collection, predict, report, scheduler, status, monitor)
-3. **Ingestion**: 
+3. **Ingestion**:
    - REST API: `data/` modules fetch EODHD data, validate quality, persist via `bulk_upsert_market_data()`
    - WebSocket: `data/websocket_client.py` receives real-time ticks → `data/tick_aggregator.py` aggregates into bars → `data/websocket_manager.py` buffers and stores
    - Continuous: `data/collection_service.py` manages batch collection → `data/collection_scheduler.py` orchestrates 24/7 collection with dynamic intervals
 4. **Calculations**: `calculations/` modules produce PLdot, envelopes, states, patterns, multi-timeframe alignment (with caching and profiling)
-5. **Backtesting**: 
+   - NEW: Termination pattern detection when price approaches projected Drummond lines
+   - NEW: Congestion state tracking preserves trend direction through extended congestion
+   - NEW: Two envelope methods: pldot_range (default) and hlc_range (alternative)
+5. **Backtesting**:
    - Single-symbol: `backtesting/runner.py` loads historical bars, runs strategies through `engine.py`, computes metrics, optionally persists
    - Portfolio: `backtesting/portfolio_engine.py` coordinates multi-symbol backtesting with shared capital, signal ranking, position management
+   - Strategies now support termination patterns and exhaust-based exits
 6. **Prediction**: `prediction/engine.py` orchestrates signal generation → `prediction/scheduler.py` schedules execution → `prediction/notifications/` delivers alerts
+   - NEW: Tiered signal system (HIGH/MEDIUM/LOW) with different thresholds
+   - NEW: Exit signal generation for exhaust patterns and HTF reversals
 7. **Dashboard**: `dashboard/app.py` serves Streamlit UI → `dashboard/realtime_client.py` connects to WebSocket → pages render data from persistence layer
 8. **Monitoring**: `monitoring/report.py` generates ingestion coverage summaries; `prediction/monitoring/` tracks performance and calibration
 
@@ -848,12 +893,12 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 ### Core Tables
 - **market_symbols**: symbol (unique), exchange, metadata (sector, industry, market_cap), is_active
 - **market_data**: OHLCV bars with interval_type, unique on (symbol_id, timestamp, interval_type)
-- **market_states_v2**: Enhanced state classification with confidence, trend direction, PLdot slope, bars_in_state
-- **pattern_events**: Detected patterns (PLDOT_PUSH, EXHAUST, C_WAVE, etc.) with direction, strength, timestamps
+- **market_states_v2**: Enhanced state classification with confidence, trend direction, PLdot slope, bars_in_state, trend_at_congestion_entrance
+- **pattern_events**: Detected patterns (PLDOT_PUSH, EXHAUST, C_WAVE, TERMINATION_APPROACH, TERMINATION_TOUCH, etc.) with direction, strength, timestamps
 - **multi_timeframe_analysis**: HTF/trading TF alignment, signal strength, recommended action, confluence zones count
 - **confluence_zones**: Support/resistance zones confirmed by multiple timeframes (strength >= 2)
 - **prediction_runs**: Prediction cycle metadata with timing breakdown
-- **generated_signals**: Trading signals with confidence scores, context, outcomes, notification tracking
+- **generated_signals**: Trading signals with confidence scores, context, outcomes, notification tracking, tier information
 - **prediction_metrics**: Time-series performance and calibration metrics
 - **scheduler_state**: Singleton table for scheduler status and recovery
 - **exchanges**: Exchange metadata (timezone, market_open/close times, country, currency, sync tracking)
@@ -887,12 +932,16 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 11. **Comprehensive monitoring**: Performance tracking, calibration, SLA compliance built-in
 12. **Continuous data collection**: 24/7 data collection service with dynamic intervals, WebSocket integration, automatic retry logic
 13. **Tick aggregation**: Real-time tick-to-bar aggregation for WebSocket data streams
+14. **Advanced pattern detection**: Termination patterns for Drummond line projected levels
+15. **Risk management**: Exhaust-based exit signal generation
+16. **Improved state tracking**: Congestion state fixes preserve trend through extended phases
+17. **Flexible signal generation**: Tiered confidence system allows more nuanced trading
 
 ### Areas for Improvement
 1. **Error handling**: Some areas could benefit from more specific exception types (e.g., CalculationError, PersistenceError)
 2. **Logging**: Consider structured logging (structlog is in dependencies but not extensively used)
 3. **Testing**: Some calculation modules could use more edge case coverage
-4. **Documentation**: Inline docstrings are good, but some complex algorithms (multi-timeframe coordination, portfolio backtesting, tick aggregation) could use more explanation
+4. **Documentation**: Inline docstrings are good, but some complex algorithms (multi-timeframe coordination, portfolio backtesting, tick aggregation, termination detection) could use more explanation
 5. **Async support**: Consider async/await for I/O-bound operations (database, API calls) in future versions
 6. **Distributed caching**: Current caching is in-memory; consider Redis for multi-process deployments
 7. **WebSocket resilience**: Consider circuit breaker pattern for WebSocket reconnection logic
@@ -907,7 +956,7 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 - **Decimal precision**: Consistently used for all prices (good)
 - **UTC timestamps**: Consistently applied (good)
 - **Frozen models**: All calculation results are immutable (excellent)
-- **Enum usage**: Consistent use of Enums for state types, pattern types, trend directions (good)
+- **Enum usage**: Consistent use of Enums for state types, pattern types, trend directions, signal tiers (good)
 
 ### Design Patterns
 - **Factory pattern**: IntervalData.from_api_record, EODHDConfig.from_settings, ConfigLoader.generate_sample_config
@@ -919,6 +968,7 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 - **Observer pattern**: DataUpdateListener for cache invalidation on data updates
 - **Template method pattern**: BaseTradeExecutor provides shared execution logic, BaseStrategy for strategy framework
 - **Builder pattern**: TickAggregator builds bars from ticks incrementally
+- **Configuration pattern**: TerminationConfig, TieredSignalConfig for flexible feature configuration
 
 ### Performance Architecture
 - **Connection pooling**: Reduces connection overhead, especially important for prediction cycles processing multiple symbols
@@ -948,6 +998,13 @@ Tables: market_data, market_states_v2, pattern_events, multi_timeframe_analysis,
 - **Automatic retry**: Exponential backoff with jitter for failed collections
 - **WebSocket resilience**: Multiple connections (50 symbols each), automatic reconnection with exponential backoff
 - **State management**: Tracks collection runs in database for monitoring and recovery
+
+### Recent Improvements (2024)
+1. **Drummond Line Termination Detection**: Core Drummond concept now implemented - detects when price approaches/touches projected trendline termination points where energy is expected to exhaust
+2. **Exhaust-Based Exit Signals**: Risk management enhanced with automatic exit generation when exhaust patterns detected against position
+3. **Congestion State Tracking Fix**: Preserves original trend direction through extended congestion phases, ensuring accurate CONGESTION_EXIT vs REVERSAL classification
+4. **Tiered Signal Confidence System**: Three-tier system (HIGH/MEDIUM/LOW) allows flexible signal generation with appropriate position sizing for different confidence levels
+5. **Envelope Calculation Methods**: Added hlc_range method using 3-bar high-low range as alternative to PLdot standard deviation, with validation script for empirical comparison
 
 ---
 

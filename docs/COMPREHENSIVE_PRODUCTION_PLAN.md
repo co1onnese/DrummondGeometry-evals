@@ -1,60 +1,79 @@
 # DGAS Comprehensive Production Deployment Plan
 
-**Version**: 2.0  
-**Date**: 2025-11-16  
-**Purpose**: Complete strategic plan for 24/7 production operation of DGAS with continuous data collection, signal generation, and Discord notifications
-
----
-
-## Table of Contents
-
-1. [Executive Summary](#executive-summary)
-2. [Pre-Deployment Verification](#pre-deployment-verification)
-3. [System Architecture](#system-architecture)
-4. [Data Collection Service Strategy](#data-collection-service-strategy)
-5. [Prediction Scheduler Strategy](#prediction-scheduler-strategy)
-6. [Discord Notification Setup](#discord-notification-setup)
-7. [Dashboard Deployment Strategy](#dashboard-deployment-strategy)
-8. [Screen Session Management](#screen-session-management)
-9. [Monitoring & Health Checks](#monitoring--health-checks)
-10. [Historical Data Verification](#historical-data-verification)
-11. [Startup Sequence](#startup-sequence)
-12. [Ongoing Operations](#ongoing-operations)
-13. [Troubleshooting Strategy](#troubleshooting-strategy)
-14. [Recovery Procedures](#recovery-procedures)
-15. [Maintenance Schedule](#maintenance-schedule)
+**Version**: 1.0  
+**Date**: 2025-01-27  
+**Purpose**: Complete strategic plan for deploying and operating DGAS in 24/7 production with continuous data collection, automated signal generation, and Discord notifications
 
 ---
 
 ## Executive Summary
 
-### Production Goals
+This document provides a comprehensive strategy for running the Drummond Geometry Analysis System (DGAS) in production. The system will:
 
-The DGAS system will operate 24/7 in production to:
-
-1. **Continuously collect market data** for 517+ US stocks via EODHD API
-2. **Generate trading signals** every 15 minutes with Drummond Geometry analysis
+1. **Continuously collect market data** for 517+ US stocks via EODHD API (24/7 operation)
+2. **Generate trading signals** every 15 minutes using multi-timeframe Drummond Geometry analysis
 3. **Post Discord alerts** automatically when signals with confidence ≥ 65% are generated
 4. **Serve a real-time dashboard** for monitoring and analysis
 5. **Maintain data freshness** with automatic gap detection and backfilling
 
-### Key Components
+### System Architecture
 
-| Component | Purpose | Runtime | Screen Session |
-|-----------|---------|---------|----------------|
-| **Data Collection Service** | 24/7 market data ingestion | Continuous | `dgas_data_collection` |
-| **Prediction Scheduler** | Automated signal generation | Every 15 min | `dgas_prediction_scheduler` |
-| **Dashboard** | Web-based monitoring interface | Continuous | `dgas_dashboard` |
-| **PostgreSQL Database** | Data persistence | Continuous | N/A (systemd) |
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Production Server                            │
+│                                                                 │
+│  ┌──────────────────────┐  ┌──────────────────────┐            │
+│  │  Screen Session      │  │  Screen Session      │            │
+│  │  Data Collection    │  │  Prediction          │            │
+│  │  Service            │  │  Scheduler           │            │
+│  │                     │  │                      │            │
+│  │  • WebSocket (Mkt) │  │  • Every 15 min     │            │
+│  │  • REST API (Aft)   │  │  • 517+ symbols     │            │
+│  │  • 24/7 operation   │  │  • Signal generation│            │
+│  │  • Auto-retry       │  │  • Discord alerts  │            │
+│  └──────────┬──────────┘  └──────────┬──────────┘            │
+│             │                         │                        │
+│             └─────────────┬───────────┘                        │
+│                           │                                    │
+│                  ┌─────────▼─────────┐                         │
+│                  │  PostgreSQL DB     │                         │
+│                  │  (Historical Data)│                         │
+│                  │  • 6.6M+ bars     │                         │
+│                  │  • 517+ symbols   │                         │
+│                  └─────────┬─────────┘                         │
+│                            │                                    │
+│  ┌──────────────────────────▼──────────────────────┐          │
+│  │     Screen Session: Dashboard                    │          │
+│  │     Streamlit on port 8501                       │          │
+│  │     • Real-time monitoring                       │          │
+│  │     • Signal visualization                       │          │
+│  │     • System status                              │          │
+│  └──────────────────────────────────────────────────┘          │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────┐          │
+│  │  External Services                                │          │
+│  │  • EODHD API (Market Data)                        │          │
+│  │  • Discord API (Notifications)                   │          │
+│  └──────────────────────────────────────────────────┘          │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-### Success Criteria
+---
 
-- ✅ All services running in persistent screen sessions
-- ✅ Data collection running 24/7 with <1% failure rate
-- ✅ Prediction scheduler executing every 15 minutes
-- ✅ Discord notifications working for high-confidence signals
-- ✅ Dashboard accessible and showing real-time data
-- ✅ Historical data verified and complete
+## Table of Contents
+
+1. [Pre-Deployment Verification](#pre-deployment-verification)
+2. [Historical Data Verification](#historical-data-verification)
+3. [Data Collection Service Strategy](#data-collection-service-strategy)
+4. [Prediction Scheduler Strategy](#prediction-scheduler-strategy)
+5. [Discord Notification Strategy](#discord-notification-strategy)
+6. [Dashboard Deployment Strategy](#dashboard-deployment-strategy)
+7. [Screen Session Management](#screen-session-management)
+8. [Monitoring & Health Checks](#monitoring--health-checks)
+9. [Startup Sequence](#startup-sequence)
+10. [Ongoing Operations](#ongoing-operations)
+11. [Troubleshooting Strategy](#troubleshooting-strategy)
+12. [Recovery Procedures](#recovery-procedures)
 
 ---
 
@@ -98,71 +117,7 @@ psql "$DGAS_DATABASE_URL" -c "SHOW max_connections;"
 - [ ] 517+ symbols registered in `market_symbols` table
 - [ ] Connection pool size is appropriate (10 connections for 3 CPUs)
 
-### 2. Historical Data Verification
-
-**Objective**: Confirm all historical data has been backfilled correctly and is ready for production.
-
-**Verification Steps**:
-
-```bash
-# 1. Check data coverage for all symbols
-cd /opt/DrummondGeometry-evals
-uv run python scripts/check_data_gaps.py --interval 30m --target-date $(date +%Y-%m-%d)
-
-# 2. Verify data freshness (latest timestamps)
-uv run python scripts/verify_data_freshness.py
-
-# 3. Check specific symbol coverage
-uv run dgas data quality-report --symbol AAPL --interval 30m
-
-# 4. Verify data completeness for production symbols
-psql "$DGAS_DATABASE_URL" << 'EOF'
-SELECT 
-    s.symbol,
-    COUNT(md.timestamp) as bar_count,
-    MIN(md.timestamp) as earliest_bar,
-    MAX(md.timestamp) as latest_bar,
-    MAX(md.timestamp) > NOW() - INTERVAL '2 days' as recent_data
-FROM market_symbols s
-LEFT JOIN market_data md ON md.symbol_id = s.id AND md.interval_type = '30m'
-WHERE s.is_active = true
-GROUP BY s.symbol
-HAVING COUNT(md.timestamp) > 0
-ORDER BY latest_bar DESC
-LIMIT 20;
-EOF
-
-# 5. Check for data gaps in critical timeframes
-psql "$DGAS_DATABASE_URL" << 'EOF'
--- Check for symbols with no recent data (last 7 days)
-SELECT 
-    s.symbol,
-    MAX(md.timestamp) as latest_timestamp,
-    NOW() - MAX(md.timestamp) as age
-FROM market_symbols s
-LEFT JOIN market_data md ON md.symbol_id = s.id AND md.interval_type = '30m'
-WHERE s.is_active = true
-GROUP BY s.symbol
-HAVING MAX(md.timestamp) < NOW() - INTERVAL '7 days' OR MAX(md.timestamp) IS NULL
-ORDER BY age DESC;
-EOF
-```
-
-**Expected Results**:
-- All 517+ active symbols have historical data
-- Latest timestamps are within 2 days of current date (for active trading days)
-- No symbols show "no data" status
-- Data quality metrics show >99% completeness
-- No significant gaps in 30m interval data
-
-**Checklist**:
-- [ ] All active symbols have historical data
-- [ ] Data is current up to most recent trading day
-- [ ] No significant gaps in 30m interval data
-- [ ] Data quality metrics are acceptable (>99% completeness)
-- [ ] Latest timestamps are recent (within 2 days for active trading)
-
-### 3. Environment Configuration Verification
+### 2. Environment Configuration Verification
 
 **Objective**: Verify all required environment variables are set correctly.
 
@@ -221,7 +176,7 @@ EOF
 - [ ] `DGAS_DISCORD_CHANNEL_ID` is set (if using Discord)
 - [ ] All environment variables load correctly
 
-### 4. Configuration File Verification
+### 3. Configuration File Verification
 
 **Objective**: Verify production configuration file is correct and complete.
 
@@ -272,68 +227,117 @@ grep -A 3 "prediction:" config/production.yaml
 
 ---
 
-## System Architecture
+## Historical Data Verification
 
-### Component Overview
+### Verification Strategy
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Production Server                            │
-│                                                                 │
-│  ┌──────────────────────┐  ┌──────────────────────┐            │
-│  │  Screen Session      │  │  Screen Session      │            │
-│  │  Data Collection    │  │  Prediction          │            │
-│  │  Service            │  │  Scheduler           │            │
-│  │                     │  │                      │            │
-│  │  • WebSocket (Mkt)  │  │  • Every 15 min     │            │
-│  │  • REST API (Aft)   │  │  • 517+ symbols     │            │
-│  │  • 24/7 operation   │  │  • Signal generation│            │
-│  └──────────┬──────────┘  └──────────┬──────────┘            │
-│             │                         │                        │
-│             └─────────────┬───────────┘                        │
-│                           │                                    │
-│                  ┌─────────▼─────────┐                         │
-│                  │  PostgreSQL DB     │                         │
-│                  │  (Historical Data)│                         │
-│                  └─────────┬─────────┘                         │
-│                             │                                    │
-│  ┌──────────────────────────▼──────────────────────┐          │
-│  │     Screen Session: Dashboard                    │          │
-│  │     Streamlit on port 8501                       │          │
-│  │     • Real-time monitoring                       │          │
-│  │     • Signal visualization                       │          │
-│  │     • System status                              │          │
-│  └──────────────────────────────────────────────────┘          │
-│                                                                 │
-│  ┌──────────────────────────────────────────────────┐          │
-│  │  External Services                                │          │
-│  │  • EODHD API (Market Data)                        │          │
-│  │  • Discord API (Notifications)                   │          │
-│  └──────────────────────────────────────────────────┘          │
-└─────────────────────────────────────────────────────────────────┘
+**Objective**: Ensure all historical data is complete and ready for production signal generation.
+
+### Step 1: Symbol Coverage Verification
+
+```bash
+# Check all active symbols have data
+cd /opt/DrummondGeometry-evals
+source .env
+psql "$DGAS_DATABASE_URL" << 'EOF'
+SELECT 
+    COUNT(DISTINCT s.id) as total_symbols,
+    COUNT(DISTINCT md.symbol_id) as symbols_with_data,
+    COUNT(DISTINCT s.id) - COUNT(DISTINCT md.symbol_id) as symbols_without_data
+FROM market_symbols s
+LEFT JOIN market_data md ON md.symbol_id = s.id AND md.interval_type = '30m'
+WHERE s.is_active = true;
+EOF
+# Expected: symbols_without_data = 0
 ```
 
-### Data Flow
+### Step 2: Data Completeness Verification
 
-1. **Data Collection Flow**:
-   ```
-   EODHD API → Data Collection Service → PostgreSQL
-   ├─ Market Hours: WebSocket → Tick Aggregator → 30m bars
-   └─ After Hours: REST API → 30m bars directly
-   ```
+```bash
+# Check data coverage for each symbol
+psql "$DGAS_DATABASE_URL" << 'EOF'
+SELECT 
+    s.symbol,
+    COUNT(md.timestamp) as bar_count,
+    MIN(md.timestamp) as earliest_bar,
+    MAX(md.timestamp) as latest_bar,
+    CASE 
+        WHEN MAX(md.timestamp) > NOW() - INTERVAL '2 days' THEN 'RECENT'
+        WHEN MAX(md.timestamp) > NOW() - INTERVAL '7 days' THEN 'STALE'
+        ELSE 'VERY_STALE'
+    END as freshness_status
+FROM market_symbols s
+LEFT JOIN market_data md ON md.symbol_id = s.id AND md.interval_type = '30m'
+WHERE s.is_active = true
+GROUP BY s.symbol
+HAVING COUNT(md.timestamp) > 0
+ORDER BY latest_bar ASC
+LIMIT 20;
+EOF
+# Expected: Most symbols show 'RECENT' status
+```
 
-2. **Signal Generation Flow**:
-   ```
-   PostgreSQL → Prediction Scheduler → Drummond Analysis → Signal Generator
-   → Discord Notification (if confidence ≥ 65%)
-   → Database (prediction_runs, generated_signals)
-   ```
+### Step 3: Data Gap Detection
 
-3. **Dashboard Flow**:
-   ```
-   PostgreSQL → Dashboard → Streamlit UI
-   └─ Real-time updates via WebSocket (if configured)
-   ```
+```bash
+# Run gap detection script
+cd /opt/DrummondGeometry-evals
+uv run python scripts/check_data_gaps.py --interval 30m --target-date $(date +%Y-%m-%d)
+# Expected: No significant gaps reported
+```
+
+### Step 4: Data Quality Verification
+
+```bash
+# Check data quality for sample symbols
+for symbol in AAPL MSFT GOOGL AMZN TSLA; do
+    echo "Checking $symbol..."
+    uv run dgas data quality-report --symbol "$symbol" --interval 30m
+done
+# Expected: All symbols show good quality metrics
+```
+
+### Step 5: Data Freshness Verification
+
+```bash
+# Verify data freshness
+cd /opt/DrummondGeometry-evals
+uv run python scripts/verify_data_freshness.py
+# Expected: Latest timestamps are recent (within 2 days for active trading)
+```
+
+### Step 6: Multi-Timeframe Readiness
+
+```bash
+# Verify we have sufficient data for multi-timeframe analysis
+psql "$DGAS_DATABASE_URL" << 'EOF'
+-- Check if we have enough bars for HTF analysis (need at least 100 bars)
+SELECT 
+    s.symbol,
+    COUNT(md.timestamp) as bar_count,
+    CASE 
+        WHEN COUNT(md.timestamp) >= 100 THEN 'SUFFICIENT'
+        ELSE 'INSUFFICIENT'
+    END as readiness
+FROM market_symbols s
+LEFT JOIN market_data md ON md.symbol_id = s.id AND md.interval_type = '30m'
+WHERE s.is_active = true
+GROUP BY s.symbol
+HAVING COUNT(md.timestamp) < 100
+ORDER BY bar_count DESC
+LIMIT 20;
+EOF
+# Expected: All symbols have sufficient data (100+ bars)
+```
+
+### Verification Checklist
+
+- [ ] All 517+ active symbols have historical data
+- [ ] Latest timestamps are within 2 days of current date (for active trading)
+- [ ] No significant gaps in 30m interval data
+- [ ] Data quality metrics show >99% completeness
+- [ ] All symbols have sufficient data for multi-timeframe analysis (100+ bars)
+- [ ] Data is ready for production signal generation
 
 ---
 
@@ -344,30 +348,24 @@ grep -A 3 "prediction:" config/production.yaml
 The data collection service runs 24/7 to continuously gather market data for 517+ US stocks. It uses:
 - **WebSocket** during market hours (9:30 AM - 4:00 PM ET, Mon-Fri) for real-time tick data
 - **REST API** for after-hours and weekends
-- **Dynamic intervals**: 30m during market hours, 30m after hours, 30m weekends
+- **Dynamic intervals**: 5m during market hours (aggregated to 30m), 5m after hours, 5m weekends
 
 ### Configuration Strategy
 
 **File**: `config/production.yaml`
 
-```yaml
-data_collection:
-  enabled: true
-  use_websocket: true              # WebSocket during market hours
-  websocket_interval: "30m"        # Aggregate ticks into 30m bars
-  interval_market_hours: "30m"     # REST fallback interval
-  interval_after_hours: "30m"     # After-hours interval
-  interval_weekends: "30m"        # Weekend interval
-  batch_size: 50                   # Symbols per batch
-  max_concurrent_batches: 1        # Sequential (safer)
-  requests_per_minute: 80          # EODHD API limit
-  max_retries: 3                   # Retry failed symbols
-  retry_delay_seconds: 5          # Exponential backoff
-  error_threshold_pct: 10.0       # Alert if >10% fail
-  log_collection_stats: true      # Detailed logging
-  track_freshness: true           # Track data age
-  health_check_interval: 60       # Health check every 60s
-```
+The configuration is already set up with:
+- `data_collection.enabled: true`
+- `use_websocket: true` (WebSocket during market hours)
+- `websocket_interval: "5m"` (Native 5m data, aggregated to 30m at consumption)
+- `interval_market_hours: "5m"` (REST fallback interval)
+- `interval_after_hours: "5m"` (After-hours interval)
+- `interval_weekends: "5m"` (Weekend interval)
+- `batch_size: 50` (Symbols per batch)
+- `max_concurrent_batches: 1` (Sequential processing)
+- `requests_per_minute: 80` (EODHD API limit)
+- `max_retries: 3` (Retry failed symbols)
+- `error_threshold_pct: 10.0` (Alert if >10% fail)
 
 ### Deployment Strategy
 
@@ -455,7 +453,7 @@ tail -f /var/log/dgas/data_collection.log | grep -i error
 - ✅ During market hours: WebSocket connection established automatically
 - ✅ After market hours: Switches to REST API polling
 - ✅ Logs show collection cycles with success/failure counts
-- ✅ Database receives new bars every 30 minutes (or configured interval)
+- ✅ Database receives new bars every 5 minutes (or configured interval)
 - ✅ Failed symbols are retried with exponential backoff
 - ✅ Health checks run every 60 seconds
 
@@ -496,24 +494,17 @@ The prediction scheduler runs every 15 minutes to:
 
 **File**: `config/production.yaml`
 
-```yaml
-scheduler:
-  cron_expression: "*/15 * * * *"  # Every 15 minutes
-  timezone: America/New_York
-  market_hours_only: false          # Run 24/7
-  symbols: ["AAPL"]                  # Placeholder - loaded from DB
-  htf_interval: "30m"                # Higher timeframe
-  trading_interval: "30m"            # Trading timeframe
-
-prediction:
-  min_confidence: 0.65               # Only 65%+ confidence signals
-  min_signal_strength: 0.60          # Minimum signal strength
-  stop_loss_atr_multiplier: 1.5      # Risk management
-  target_atr_multiplier: 2.5         # Reward target
-  wait_for_fresh_data: true          # Coordinate with data collection
-  max_wait_minutes: 5                # Max wait for fresh data
-  freshness_threshold_minutes: 15     # Data age threshold
-```
+The configuration is already set up with:
+- `scheduler.cron_expression: "*/15 * * * *"` (Every 15 minutes)
+- `scheduler.timezone: America/New_York`
+- `scheduler.market_hours_only: false` (Run 24/7)
+- `scheduler.htf_interval: "30m"` (Higher timeframe)
+- `scheduler.trading_interval: "30m"` (Trading timeframe)
+- `prediction.min_confidence: 0.65` (Only 65%+ confidence signals)
+- `prediction.min_signal_strength: 0.60` (Minimum signal strength)
+- `prediction.wait_for_fresh_data: true` (Coordinate with data collection)
+- `prediction.max_wait_minutes: 5` (Max wait for fresh data)
+- `prediction.freshness_threshold_minutes: 15` (Data age threshold)
 
 ### Deployment Strategy
 
@@ -622,11 +613,11 @@ uv run dgas scheduler run-once --config config/production.yaml
 - Check database for prediction runs: `psql "$DGAS_DATABASE_URL" -c "SELECT * FROM prediction_runs ORDER BY run_timestamp DESC LIMIT 5;"`
 
 **Issue**: Discord notifications not working
-- See [Discord Notification Setup](#discord-notification-setup) section
+- See [Discord Notification Strategy](#discord-notification-strategy) section
 
 ---
 
-## Discord Notification Setup
+## Discord Notification Strategy
 
 ### Overview
 
@@ -907,7 +898,7 @@ All services run in screen sessions for persistence across SSH disconnects and s
 ### Screen Session Names
 
 | Service | Screen Session Name | Purpose |
-|--------|-------------------|---------|
+|---------|-------------------|---------|
 | Data Collection | `dgas_data_collection` | 24/7 data collection |
 | Prediction Scheduler | `dgas_prediction_scheduler` | Signal generation |
 | Dashboard | `dgas_dashboard` | Web interface |
@@ -968,58 +959,11 @@ EOF
 
 **Daily Health Check Script**:
 
-Create `/opt/DrummondGeometry-evals/scripts/daily_health_check.sh`:
-
-```bash
-#!/bin/bash
-# DGAS Daily Health Check Script
-
-LOG_FILE="/var/log/dgas/health_check.log"
-DATE=$(date '+%Y-%m-%d %H:%M:%S')
-PROJECT_DIR="/opt/DrummondGeometry-evals"
-
-cd "$PROJECT_DIR"
-source .env
-
-echo "[$DATE] Starting health check..." >> "$LOG_FILE"
-
-# Check data collection
-if uv run dgas data-collection status > /dev/null 2>&1; then
-    echo "[$DATE] ✓ Data collection: RUNNING" >> "$LOG_FILE"
-else
-    echo "[$DATE] ✗ Data collection: STOPPED" >> "$LOG_FILE"
-fi
-
-# Check prediction scheduler
-if uv run dgas scheduler status > /dev/null 2>&1; then
-    echo "[$DATE] ✓ Prediction scheduler: RUNNING" >> "$LOG_FILE"
-else
-    echo "[$DATE] ✗ Prediction scheduler: STOPPED" >> "$LOG_FILE"
-fi
-
-# Check dashboard
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8501 2>/dev/null || echo "000")
-if [ "$HTTP_CODE" = "200" ]; then
-    echo "[$DATE] ✓ Dashboard: RUNNING" >> "$LOG_FILE"
-else
-    echo "[$DATE] ✗ Dashboard: STOPPED (HTTP $HTTP_CODE)" >> "$LOG_FILE"
-fi
-
-# Check database
-if psql "$DGAS_DATABASE_URL" -c "SELECT 1;" > /dev/null 2>&1; then
-    echo "[$DATE] ✓ Database: ACCESSIBLE" >> "$LOG_FILE"
-else
-    echo "[$DATE] ✗ Database: INACCESSIBLE" >> "$LOG_FILE"
-fi
-
-echo "[$DATE] Health check completed" >> "$LOG_FILE"
-```
-
-**Make executable**:
-
-```bash
-chmod +x /opt/DrummondGeometry-evals/scripts/daily_health_check.sh
-```
+The script `scripts/daily_health_check.sh` is already created and checks:
+- Data collection service status
+- Prediction scheduler status
+- Dashboard HTTP status
+- Database connectivity
 
 **Set up cron job** (runs every hour):
 
@@ -1128,7 +1072,7 @@ ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC
 LIMIT 10;
 EOF
 
-# Connection pool usage (if monitoring available)
+# Connection pool usage
 psql "$DGAS_DATABASE_URL" << 'EOF'
 SELECT count(*) as active_connections 
 FROM pg_stat_activity 
@@ -1167,109 +1111,6 @@ uv run dgas monitor --summary --hours 24
 # Data freshness
 uv run python scripts/verify_data_freshness.py
 ```
-
----
-
-## Historical Data Verification
-
-### Verification Strategy
-
-**Objective**: Ensure all historical data is complete and ready for production signal generation.
-
-### Step 1: Symbol Coverage Verification
-
-```bash
-# Check all active symbols have data
-psql "$DGAS_DATABASE_URL" << 'EOF'
-SELECT 
-    COUNT(DISTINCT s.id) as total_symbols,
-    COUNT(DISTINCT md.symbol_id) as symbols_with_data,
-    COUNT(DISTINCT s.id) - COUNT(DISTINCT md.symbol_id) as symbols_without_data
-FROM market_symbols s
-LEFT JOIN market_data md ON md.symbol_id = s.id AND md.interval_type = '30m'
-WHERE s.is_active = true;
-EOF
-# Expected: symbols_without_data = 0
-```
-
-### Step 2: Data Completeness Verification
-
-```bash
-# Check data coverage for each symbol
-psql "$DGAS_DATABASE_URL" << 'EOF'
-SELECT 
-    s.symbol,
-    COUNT(md.timestamp) as bar_count,
-    MIN(md.timestamp) as earliest_bar,
-    MAX(md.timestamp) as latest_bar,
-    CASE 
-        WHEN MAX(md.timestamp) > NOW() - INTERVAL '2 days' THEN 'RECENT'
-        WHEN MAX(md.timestamp) > NOW() - INTERVAL '7 days' THEN 'STALE'
-        ELSE 'VERY_STALE'
-    END as freshness_status
-FROM market_symbols s
-LEFT JOIN market_data md ON md.symbol_id = s.id AND md.interval_type = '30m'
-WHERE s.is_active = true
-GROUP BY s.symbol
-HAVING COUNT(md.timestamp) > 0
-ORDER BY latest_bar ASC
-LIMIT 20;
-EOF
-# Expected: Most symbols show 'RECENT' status
-```
-
-### Step 3: Data Gap Detection
-
-```bash
-# Run gap detection script
-cd /opt/DrummondGeometry-evals
-uv run python scripts/check_data_gaps.py --interval 30m --target-date $(date +%Y-%m-%d)
-# Expected: No significant gaps reported
-```
-
-### Step 4: Data Quality Verification
-
-```bash
-# Check data quality for sample symbols
-for symbol in AAPL MSFT GOOGL AMZN TSLA; do
-    echo "Checking $symbol..."
-    uv run dgas data quality-report --symbol "$symbol" --interval 30m
-done
-# Expected: All symbols show good quality metrics
-```
-
-### Step 5: Multi-Timeframe Readiness
-
-```bash
-# Verify we have sufficient data for multi-timeframe analysis
-psql "$DGAS_DATABASE_URL" << 'EOF'
--- Check if we have enough bars for HTF analysis (need at least 100 bars)
-SELECT 
-    s.symbol,
-    COUNT(md.timestamp) as bar_count,
-    CASE 
-        WHEN COUNT(md.timestamp) >= 100 THEN 'SUFFICIENT'
-        ELSE 'INSUFFICIENT'
-    END as readiness
-FROM market_symbols s
-LEFT JOIN market_data md ON md.symbol_id = s.id AND md.interval_type = '30m'
-WHERE s.is_active = true
-GROUP BY s.symbol
-HAVING COUNT(md.timestamp) < 100
-ORDER BY bar_count DESC
-LIMIT 20;
-EOF
-# Expected: All symbols have sufficient data (100+ bars)
-```
-
-### Verification Checklist
-
-- [ ] All 517+ active symbols have historical data
-- [ ] Latest timestamps are within 2 days of current date (for active trading)
-- [ ] No significant gaps in 30m interval data
-- [ ] Data quality metrics show >99% completeness
-- [ ] All symbols have sufficient data for multi-timeframe analysis (100+ bars)
-- [ ] Data is ready for production signal generation
 
 ---
 
@@ -1674,61 +1515,33 @@ uv run python scripts/verify_data_freshness.py
 
 ---
 
-## Maintenance Schedule
+## Success Criteria
 
-### Daily Maintenance (Automated)
+### Pre-Deployment
 
-- **2:00 AM**: Database backup (if configured)
-- **3:00 AM**: Log rotation (if configured)
-- **4:00 AM**: Cache cleanup (if configured)
+- ✅ All pre-deployment verification checklists completed
+- ✅ Historical data verified and complete
+- ✅ Environment variables configured
+- ✅ Production configuration validated
+- ✅ Discord bot created and configured
 
-### Weekly Maintenance (Manual - Sunday)
+### Post-Deployment
 
-1. **Review Performance**
-   - Generate weekly report
-   - Analyze trends
-   - Identify issues
+- ✅ All services running in screen sessions
+- ✅ Data collection running 24/7
+- ✅ Prediction scheduler executing every 15 minutes
+- ✅ Discord notifications working
+- ✅ Dashboard accessible
+- ✅ Historical data verified and complete
 
-2. **Check Database**
-   - Run VACUUM ANALYZE
-   - Check index usage
-   - Review table sizes
+### Ongoing Operations
 
-3. **Review Logs**
-   - Archive old logs
-   - Search for recurring errors
-   - Clean up temporary files
-
-**Commands**:
-```bash
-# Weekly maintenance
-psql "$DGAS_DATABASE_URL" -c "VACUUM ANALYZE;"
-uv run dgas report recent-signals --hours 168 --output reports/weekly_$(date +%Y%m%d).md
-```
-
-### Monthly Maintenance (Manual - First Sunday)
-
-1. **Database Maintenance**
-   - Full VACUUM
-   - Reindex if needed
-   - Update statistics
-
-2. **Performance Review**
-   - Analyze monthly trends
-   - Compare to SLAs
-   - Plan optimizations
-
-3. **Configuration Review**
-   - Check for outdated settings
-   - Review thresholds
-   - Update if needed
-
-**Commands**:
-```bash
-# Monthly maintenance
-psql "$DGAS_DATABASE_URL" -c "VACUUM FULL ANALYZE;"
-psql "$DGAS_DATABASE_URL" -c "REINDEX DATABASE dgas;"
-```
+- ✅ Data collection success rate >95%
+- ✅ Prediction cycles executing on schedule
+- ✅ Signals being generated with appropriate confidence
+- ✅ Discord notifications delivered successfully
+- ✅ Dashboard showing real-time data
+- ✅ System health checks passing
 
 ---
 
@@ -1745,23 +1558,15 @@ This comprehensive production plan provides a complete strategy for deploying an
 ### Next Steps
 
 1. Complete pre-deployment verification checklist
-2. Set up Discord bot and configure notifications
-3. Start all services using startup script
-4. Verify all services are running correctly
-5. Monitor for first 24 hours
-6. Review and adjust configuration as needed
-
-### Success Criteria
-
-- ✅ All services running in screen sessions
-- ✅ Data collection running 24/7
-- ✅ Prediction scheduler executing every 15 minutes
-- ✅ Discord notifications working
-- ✅ Dashboard accessible
-- ✅ Historical data verified and complete
+2. Verify historical data is complete
+3. Set up Discord bot and configure notifications
+4. Start all services using startup script
+5. Verify all services are running correctly
+6. Monitor for first 24 hours
+7. Review and adjust configuration as needed
 
 ---
 
-**Document Version**: 2.0  
-**Last Updated**: 2025-11-16  
-**Next Review**: 2025-12-16
+**Document Version**: 1.0  
+**Last Updated**: 2025-01-27  
+**Next Review**: 2025-02-27
