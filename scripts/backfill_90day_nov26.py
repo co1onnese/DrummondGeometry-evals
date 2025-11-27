@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Backfill data for Nov 6-13 backtest with 90-day lookback.
+Backfill data for 90-day backtest ending Nov 26, 2025.
 
-Backfills both 30m and 1d intervals for all active symbols:
-- 30m: Nov 1-13 (lookback + trading period)
-- 1d: 90 days before Nov 13 - Nov 13 (HTF lookback + trading period)
+Backfills both 5m and 1d intervals for all active symbols:
+- 5m: June 1 - Nov 26, 2025 (180 days for backtest + lookback)
+- 1d: June 1 - Nov 26, 2025 (180 days for HTF analysis)
 """
 
 import sys
@@ -41,7 +41,7 @@ def backfill_interval(
     
     Args:
         symbols: List of symbols to backfill
-        interval: Data interval ("30m" or "1d")
+        interval: Data interval ("5m" or "1d")
         start_date: Start date (YYYY-MM-DD)
         end_date: End date (YYYY-MM-DD)
         batch_size: Symbols per batch
@@ -93,7 +93,7 @@ def backfill_interval(
                         client=api,
                     )
                 else:
-                    # Use intraday backfill for 30m data
+                    # Use intraday backfill for 5m data
                     summary = backfill_intraday(
                         symbol=symbol,
                         exchange="US",
@@ -145,19 +145,19 @@ def backfill_interval(
     }
 
 
-def print_summary(stats_30m: dict, stats_1d: dict) -> None:
+def print_summary(stats_5m: dict, stats_1d: dict) -> None:
     """Print backfill summary."""
     print("\n" + "="*80)
     print("BACKFILL SUMMARY")
     print("="*80)
     
-    print(f"\n30m Interval:")
-    print(f"  Symbols processed: {stats_30m['total_symbols']}")
-    print(f"  Successful: {stats_30m['successful']}")
-    print(f"  Skipped: {stats_30m['skipped']}")
-    print(f"  Failed: {stats_30m['failed']}")
-    print(f"  Total bars fetched: {stats_30m['total_fetched']:,}")
-    print(f"  Total bars stored: {stats_30m['total_stored']:,}")
+    print(f"\n5m Interval:")
+    print(f"  Symbols processed: {stats_5m['total_symbols']}")
+    print(f"  Successful: {stats_5m['successful']}")
+    print(f"  Skipped: {stats_5m['skipped']}")
+    print(f"  Failed: {stats_5m['failed']}")
+    print(f"  Total bars fetched: {stats_5m['total_fetched']:,}")
+    print(f"  Total bars stored: {stats_5m['total_stored']:,}")
     
     print(f"\n1d Interval:")
     print(f"  Symbols processed: {stats_1d['total_symbols']}")
@@ -168,12 +168,12 @@ def print_summary(stats_30m: dict, stats_1d: dict) -> None:
     print(f"  Total bars stored: {stats_1d['total_stored']:,}")
     
     # Show failed symbols
-    if stats_30m['failed_symbols']:
-        print(f"\n30m Failed symbols ({len(stats_30m['failed_symbols'])}):")
-        for symbol, error in stats_30m['failed_symbols'][:10]:
+    if stats_5m['failed_symbols']:
+        print(f"\n5m Failed symbols ({len(stats_5m['failed_symbols'])}):")
+        for symbol, error in stats_5m['failed_symbols'][:10]:
             print(f"  - {symbol}: {error[:80]}")
-        if len(stats_30m['failed_symbols']) > 10:
-            print(f"  ... and {len(stats_30m['failed_symbols']) - 10} more")
+        if len(stats_5m['failed_symbols']) > 10:
+            print(f"  ... and {len(stats_5m['failed_symbols']) - 10} more")
     
     if stats_1d['failed_symbols']:
         print(f"\n1d Failed symbols ({len(stats_1d['failed_symbols'])}):")
@@ -188,18 +188,25 @@ def print_summary(stats_30m: dict, stats_1d: dict) -> None:
 def main() -> int:
     """Main execution function."""
     print("="*80)
-    print("BACKFILL DATA FOR NOV 6-13 BACKTEST (90-DAY LOOKBACK)")
+    print("BACKFILL DATA FOR 90-DAY BACKTEST ENDING NOV 26, 2025")
     print("="*80)
     print()
     
-    # Calculate 90-day lookback date
-    end_date = datetime(2025, 11, 13, tzinfo=timezone.utc)
-    start_date_1d = end_date - timedelta(days=90)
-    start_date_1d_str = start_date_1d.strftime("%Y-%m-%d")
+    # Calculate dates
+    # End date: Wednesday, November 26, 2025 (end of trading day)
+    end_date = datetime(2025, 11, 26, tzinfo=timezone.utc)
+    
+    # Start date: 180 days before (June 1, 2025)
+    # This gives us 90 days for backtest + 90 days of lookback
+    start_date = end_date - timedelta(days=180)
+    start_date_str = start_date.strftime("%Y-%m-%d")
+    end_date_str = end_date.strftime("%Y-%m-%d")
     
     print("This script will backfill:")
-    print("  - 30m data: Nov 1-13 (lookback + trading period)")
-    print(f"  - 1d data: {start_date_1d_str} - Nov 13 (90-day HTF lookback + trading period)")
+    print(f"  - 5m data: {start_date_str} to {end_date_str} (180 days)")
+    print(f"  - 1d data: {start_date_str} to {end_date_str} (180 days)")
+    print()
+    print("Note: This will overwrite existing data in the database.")
     print()
     
     # Load all active symbols
@@ -210,35 +217,38 @@ def main() -> int:
         print("\n✗ ERROR: No active symbols found in database")
         return 1
     
-    # Backfill 30m data (Nov 1-13)
-    stats_30m = backfill_interval(
+    # Backfill 5m data
+    stats_5m = backfill_interval(
         symbols=symbols,
-        interval="30m",
-        start_date="2025-11-01",
-        end_date="2025-11-13",
+        interval="5m",
+        start_date=start_date_str,
+        end_date=end_date_str,
         batch_size=50,
         delay_between_batches=5.0,
     )
     
-    # Backfill 1d data (90 days before Nov 13 - Nov 13)
+    # Backfill 1d data
     stats_1d = backfill_interval(
         symbols=symbols,
         interval="1d",
-        start_date=start_date_1d_str,
-        end_date="2025-11-13",
+        start_date=start_date_str,
+        end_date=end_date_str,
         batch_size=50,
         delay_between_batches=5.0,
     )
     
     # Print summary
-    print_summary(stats_30m, stats_1d)
+    print_summary(stats_5m, stats_1d)
     
     # Return error code if there were failures
-    if stats_30m['failed'] > 0 or stats_1d['failed'] > 0:
+    if stats_5m['failed'] > 0 or stats_1d['failed'] > 0:
         print("\n⚠ Some symbols failed to backfill. Check errors above.")
         return 1
     else:
         print("\n✓ Backfill completed successfully!")
+        print("\nNext steps:")
+        print("  1. Verify data quality and coverage")
+        print("  2. Run the updated 90-day backtest script")
         return 0
 
 

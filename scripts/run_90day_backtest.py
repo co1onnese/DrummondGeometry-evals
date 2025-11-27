@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""30-day backtest using the new 5m data architecture and prediction engine.
+"""90-day backtest using the new 5m data architecture and prediction engine.
 
 This backtest:
-- Uses the past 30 days of data (approximately Oct 16 - Nov 15, 2024)
-- Leverages the new 5m data that gets aggregated to 30m on-demand
+- Uses 90 days of data (August 28 - November 26, 2025)
+- Leverages the new 5m data architecture
 - Uses the PredictionSignalStrategy with the production SignalGenerator
 - Tests all successfully backfilled symbols
 """
@@ -129,14 +129,14 @@ def save_results_to_database(result: PortfolioBacktestResult) -> int:
     from dgas.data.repository import ensure_market_symbol
     
     # Ensure the synthetic symbol exists
-    symbol_name = "30DAY_BT"
+    symbol_name = "90DAY_BT"
     with get_connection() as conn:
         ensure_market_symbol(
             conn,
             symbol_name,
             exchange="US",
             sector="Portfolio",
-            industry="30-Day Backtest",
+            industry="90-Day Backtest",
         )
     
     # Convert portfolio result to single backtest result for database
@@ -161,8 +161,8 @@ def save_results_to_database(result: PortfolioBacktestResult) -> int:
             "max_positions": result.config.max_positions,
             "start_date": result.start_date.isoformat(),
             "end_date": result.end_date.isoformat(),
-            "test_type": "30_day_backtest",
-            "data_architecture": "5m_aggregated_to_30m",
+            "test_type": "90_day_backtest",
+            "data_architecture": "5m_direct",
             "signal_generator": "PredictionEngine.SignalGenerator",
         },
     )
@@ -185,7 +185,7 @@ def print_summary(result: PortfolioBacktestResult) -> None:
         result: Portfolio backtest result
     """
     print(f"\n{'='*80}")
-    print("30-DAY BACKTEST RESULTS")
+    print("90-DAY BACKTEST RESULTS")
     print(f"{'='*80}")
     
     print(f"\nPortfolio Details:")
@@ -241,18 +241,15 @@ def print_summary(result: PortfolioBacktestResult) -> None:
 def main() -> int:
     """Main execution function."""
     print(f"\n{'='*80}")
-    print("30-DAY BACKTEST WITH NEW 5M DATA ARCHITECTURE")
+    print("90-DAY BACKTEST WITH NEW 5M DATA ARCHITECTURE")
     print("Using PredictionEngine SignalGenerator")
     print(f"{'='*80}\n")
     
-    # Configuration for past 30 days
-    END_DATE = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    START_DATE = END_DATE - timedelta(days=30)
-    
-    # Adjust to actual data availability (our backfill went to Nov 15, 2024)
-    # Let's use Oct 16 to Nov 15, 2024 (30 days)
-    START_DATE = datetime(2024, 10, 16, tzinfo=timezone.utc)
-    END_DATE = datetime(2024, 11, 15, tzinfo=timezone.utc)
+    # Configuration for 90-day backtest ending Nov 26, 2025
+    # End date: Wednesday, November 26, 2025 (end of trading day)
+    END_DATE = datetime(2025, 11, 26, tzinfo=timezone.utc)
+    # Start date: 90 days before (August 28, 2025)
+    START_DATE = END_DATE - timedelta(days=90)
     
     INTERVAL = "5m"  # Use 5m data directly (no aggregation available)
     INITIAL_CAPITAL = Decimal("100000")  # $100k
@@ -262,7 +259,7 @@ def main() -> int:
     ALLOW_SHORT = True  # Allow short selling
     
     print("Configuration:")
-    print(f"  Date Range: {START_DATE.date()} to {END_DATE.date()} (30 days)")
+    print(f"  Date Range: {START_DATE.date()} to {END_DATE.date()} (90 days)")
     print(f"  Data Source: {INTERVAL} bars (direct)")
     print(f"  Initial Capital: ${INITIAL_CAPITAL:,.2f}")
     print(f"  Risk per Trade: {RISK_PER_TRADE:.1%} (${INITIAL_CAPITAL * RISK_PER_TRADE:,.2f})")
@@ -336,12 +333,12 @@ def main() -> int:
         strategy=strategy,
     )
     
-    print("\nStarting 30-day backtest...\n", flush=True)
+    print("\nStarting 90-day backtest...\n", flush=True)
     print("This backtest will:", flush=True)
     print("  1. Load 5m data for each symbol", flush=True)
     print("  2. Generate signals using PredictionEngine", flush=True)
     print("  3. Simulate portfolio trading", flush=True)
-    print("\nEstimated time: 30-60 minutes depending on symbol count\n", flush=True)
+    print("\nEstimated time: 1-2 hours depending on symbol count\n", flush=True)
     
     try:
         result = engine.run(
@@ -357,7 +354,7 @@ def main() -> int:
         # Save to database
         save_results_to_database(result)
         
-        print("\n✓ 30-day backtest completed successfully!")
+        print("\n✓ 90-day backtest completed successfully!")
         print("\nThe backtest has validated that:")
         print("  • The 5m data architecture works correctly")
         print("  • The prediction engine generates signals as expected")
